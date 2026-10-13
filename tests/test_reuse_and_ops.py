@@ -272,3 +272,59 @@ def test_azure_sdk_errors_are_classified():
     assert run_pipeline._classify(err("ResourceNotFoundError")) == "UPSTREAM_MISSING"
     assert run_pipeline._classify(err("HttpResponseError", 403)) == "CONFIG"
     assert run_pipeline._classify(err("ServiceRequestError")) == "INFRA_TRANSIENT"
+
+
+def test_task_load_aml_workspace_resolves_and_pushes_xcom(dag, monkeypatch):
+    ti = SimpleNamespace(pushed={}, xcom_push=lambda key, value: ti.pushed.__setitem__(key, value),
+                         xcom_pull=lambda task_ids, key: ti.pushed.get(key))
+    monkeypatch.setenv("AZURE_SUBSCRIPTION_ID", "sub-123")
+    monkeypatch.setenv("AZURE_RESOURCE_GROUP", "rg-analytics")
+    monkeypatch.setenv("AZURE_WORKSPACE_NAME", "ws-prod")
+    monkeypatch.setenv("AZURE_BLOB_URL", "https://mystorage.blob.core.windows.net")
+    monkeypatch.setenv("LOKI_URL", "https://loki.internal:3100/loki/api/v1/push")
+    monkeypatch.setenv("AZURE_STORAGE_CONNECTION_STRING", "DefaultEndpointsProtocol=https;AccountName=test;")
+
+    params = {
+        "compute_cluster": "cluster-gpu",
+        "container": "custom-container",
+    }
+    cfg = dag.task_load_aml_workspace(ti=ti, params=params)
+
+    assert ti.pushed["aml_workspace"] == cfg
+    assert cfg["azure_ml"]["subscription_id"] == "sub-123"
+    assert cfg["azure_ml"]["resource_group"] == "rg-analytics"
+    assert cfg["azure_ml"]["workspace_name"] == "ws-prod"
+    assert cfg["azure_ml"]["compute_cluster"] == "cluster-gpu"
+    assert cfg["storage"]["container"] == "custom-container"
+    assert cfg["storage"]["blob_url"] == "https://mystorage.blob.core.windows.net"
+    assert cfg["storage"]["connection_string"] == "DefaultEndpointsProtocol=https;AccountName=test;"
+    assert cfg["telemetry"]["loki_url"] == "https://loki.internal:3100/loki/api/v1/push"
+
+    # Verify downstream pulling
+    pulled = dag._aml_config({"ti": ti})
+    assert pulled["azure_ml"]["workspace_name"] == "ws-prod"
+
+
+def test_aml_register_environment(monkeypatch):
+    class FakeEnv:
+        def __init__(self, name, version):
+            self.name = name
+            self.version = version
+
+    class FakeEnvClient:
+        def __init__(self):
+            self.created = []
+
+        def create_or_update(self, env):
+            self.created.append(env)
+            return FakeEnv(env.name, "2")
+
+    class FakeMLClient:
+        def __init__(self):
+            self.environments = FakeEnvClient()
+
+    client = FakeMLClient()
+    env_id = aml.register_environment("environment.yaml", ml_client=client, env_cfg=ENV)
+    assert env_id == "driver-analysis-env:2"
+    assert len(client.environments.created) == 1
+

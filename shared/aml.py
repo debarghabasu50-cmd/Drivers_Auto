@@ -35,6 +35,34 @@ def get_ml_client(env_cfg: Dict[str, Any]):
     return MLClient(DefaultAzureCredential(), a["subscription_id"], a["resource_group"], a["workspace_name"])
 
 
+def register_environment(env_yaml_path: Optional[str] = None, ml_client=None,
+                         env_cfg: Optional[Dict[str, Any]] = None) -> str:
+    """Register or update an Azure ML Environment using a YAML specification."""
+    from azure.ai.ml import load_environment
+    env_cfg = env_cfg or load_env_config()
+    ml_client = ml_client or get_ml_client(env_cfg)
+
+    path_str = env_yaml_path or env_cfg.get("azure_ml", {}).get("environment_yaml") or "environment.yaml"
+    env_path = Path(path_str)
+    if not env_path.is_absolute():
+        candidates = [CONFIG_ENV_DIR / path_str, Path(path_str).resolve(), Path(__file__).resolve().parents[1] / path_str]
+        for c in candidates:
+            if c.exists():
+                env_path = c
+                break
+
+    if not env_path.exists():
+        fallback = env_cfg.get("azure_ml", {}).get("environment_name", "driver-analysis-env:1")
+        logger.warning(f"Environment YAML '{path_str}' not found; using fallback {fallback}", event="AML_ENV_NOT_FOUND")
+        return fallback
+
+    env_entity = load_environment(source=str(env_path))
+    registered = ml_client.environments.create_or_update(env_entity)
+    registered_id = f"{registered.name}:{registered.version}"
+    logger.info(f"AML environment registered: {registered_id}", event="AML_ENV_REGISTERED", environment=registered_id)
+    return registered_id
+
+
 def submit_and_wait(argv: list, secrets: Dict[str, str], tags: Dict[str, str], ml_client=None,
                     env_cfg: Optional[Dict[str, Any]] = None, poll_s: int = 15, timeout_s: int = 6 * 3600,
                     sleep: Callable[[float], None] = time.sleep) -> int:
@@ -45,12 +73,23 @@ def submit_and_wait(argv: list, secrets: Dict[str, str], tags: Dict[str, str], m
     env_cfg = env_cfg or load_env_config()
     ml_client = ml_client or get_ml_client(env_cfg)
     a = env_cfg["azure_ml"]
+    env_vars = {
+        **secrets,
+        "AZURE_STORAGE_CONTAINER": env_cfg.get("storage", {}).get("container", "driver-analysis-dev"),
+        "IMAGE_TAG": os.environ.get("IMAGE_TAG", "unknown"),
+    }
+    if env_cfg.get("storage", {}).get("blob_url"):
+        env_vars["AZURE_BLOB_URL"] = env_cfg["storage"]["blob_url"]
+    if env_cfg.get("telemetry", {}).get("loki_url"):
+        env_vars["LOKI_URL"] = env_cfg["telemetry"]["loki_url"]
+    if env_cfg.get("telemetry", {}).get("app_insights_connection_string"):
+        env_vars["APP_INSIGHTS_CONNECTION_STRING"] = env_cfg["telemetry"]["app_insights_connection_string"]
+
     job = command(
         command=build_command(argv),
         environment=a["environment_name"],
         compute=a["compute_cluster"],
-        environment_variables={**secrets, "AZURE_STORAGE_CONTAINER": env_cfg["storage"]["container"],
-                               "IMAGE_TAG": os.environ.get("IMAGE_TAG", "unknown")},
+        environment_variables=env_vars,
         tags=tags,
         display_name=tags.get("task_id"),
         experiment_name="driver_analysis",

@@ -1,0 +1,8 @@
+$schema: https://azuremlschemas.azureedge.net/latest/environment.schema.json
+name: driver-analysis-env
+version: "1"
+description: Driver analysis causal pipeline runtime environment
+image: python:3.11-slim
+build:
+  path: ../..
+  dockerfile_path: Dockerfile
