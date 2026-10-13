@@ -1,0 +1,10 @@
+{
+  "max_lags": 4,
+  "correlation_threshold": 0.15,
+  "lasso_alpha": 0.01,
+  "tier_assignment": {
+    "P0_threshold": 0.35,
+    "P1_threshold": 0.20,
+    "P2_threshold": 0.10
+  }
+}

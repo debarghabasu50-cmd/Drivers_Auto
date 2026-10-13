@@ -1,0 +1,14 @@
+storage:
+  account_name: "stagedevkpi"
+  container: "driver-analysis-dev"
+  secret_var: "AZURE_STORAGE_CONNECTION_STRING"
+
+azure_ml:
+  subscription_id: "00000000-0000-0000-0000-000000000000"
+  resource_group: "rg-driver-analysis-dev"
+  workspace_name: "aml-driver-analysis-dev"
+  compute_cluster: "cpu-large"
+  environment_name: "driver-analysis-env:1"
+
+telemetry:
+  app_insights_secret_var: "APP_INSIGHTS_CONNECTION_STRING"

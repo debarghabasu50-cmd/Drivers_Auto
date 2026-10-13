@@ -1,0 +1,7 @@
+.mock_blob/
+__pycache__/
+.pytest_cache/
+tests/
+*.md
+artifacts/
+.venv/

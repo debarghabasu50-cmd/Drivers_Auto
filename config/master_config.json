@@ -1,0 +1,84 @@
+{
+  "div": "EL",
+  "quarter": "2026Q3",
+  "pipeline": {
+    "name": "driver_analysis",
+    "div": "EL",
+    "quarter": "2026Q3"
+  },
+  "data": {
+    "input_uri": "input/EL/2026Q3/kpi_data.parquet",
+    "date_col": "date",
+    "freq": "M"
+  },
+  "targets": [
+    {
+      "target_id": "orders",
+      "column": "orders_value"
+    }
+  ],
+  "steps": {
+    "feature_selection": "on",
+    "confounder_selection": "on",
+    "dml": "on",
+    "consolidation": "on",
+    "reports": "on"
+  },
+  "source_artifacts": {
+    "feature_selection_run_id": null,
+    "confounder_selection_run_id": null
+  },
+  "kpis": {
+    "mode": "auto_plus_extra",
+    "tiers": [
+      "P0"
+    ],
+    "explicit": [],
+    "extra": [
+      "price_index",
+      "competitor_index",
+      "gdp_growth",
+      "lead_time",
+      "marketing_spend"
+    ],
+    "exclude": []
+  },
+  "confounders": {
+    "candidate_pool": [
+      "macro_inflation",
+      "interest_rate",
+      "industry_index"
+    ],
+    "window": "common_train"
+  },
+  "combinations": {
+    "drivers_per_combo": 3,
+    "max_combinations": 100,
+    "must_include": []
+  },
+  "folds": [
+    {
+      "fold_id": "f1",
+      "train_start": "2021-01-01",
+      "train_end": "2024-12-31",
+      "test_start": "2025-01-01",
+      "test_end": "2025-03-31"
+    },
+    {
+      "fold_id": "f2",
+      "train_start": "2021-01-01",
+      "train_end": "2025-03-31",
+      "test_start": "2025-04-01",
+      "test_end": "2025-06-30"
+    }
+  ],
+  "cache": {
+    "mode": "read_write"
+  },
+  "execution": {
+    "max_parallel_folds": 8,
+    "unit_timeout_s": 300,
+    "retries": 2,
+    "n_jobs": 1
+  }
+}

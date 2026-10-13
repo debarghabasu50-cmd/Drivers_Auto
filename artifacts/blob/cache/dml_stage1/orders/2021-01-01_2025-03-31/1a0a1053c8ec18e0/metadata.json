@@ -1,0 +1,34 @@
+{
+  "cache_version": 1,
+  "controls": [
+    "competitor_index",
+    "industry_index",
+    "interest_rate",
+    "macro_inflation",
+    "price_index"
+  ],
+  "created_at": "2026-10-09T11:22:52.876834+00:00",
+  "driver_col": "marketing_spend",
+  "fingerprint": "1a0a1053c8ec18e0",
+  "fold_id": "f2",
+  "inner_cv_splits": 5,
+  "learner_spec": {
+    "model": "RandomForestRegressor",
+    "params": {
+      "max_depth": 6,
+      "n_estimators": 100,
+      "n_jobs": 1,
+      "random_state": 42
+    }
+  },
+  "producer_run_id": "dra_20261009T1200_aaa111",
+  "role": "treatment",
+  "seed": 42,
+  "source_data_hash": "snap_4d428d6c61cf97d2",
+  "source_file": "snapshots/snap_4d428d6c61cf97d2/input.parquet",
+  "target": "orders",
+  "test_end": "2025-06-30",
+  "test_start": "2025-04-01",
+  "train_end": "2025-03-31",
+  "train_start": "2021-01-01"
+}

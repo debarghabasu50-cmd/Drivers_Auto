@@ -1,0 +1,43 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "CacheMetadata",
+  "type": "object",
+  "required": [
+    "fingerprint",
+    "cache_version",
+    "role",
+    "target",
+    "driver_col",
+    "controls",
+    "train_start",
+    "train_end",
+    "test_start",
+    "test_end",
+    "fold_id",
+    "source_file",
+    "source_data_hash",
+    "learner_spec",
+    "created_at",
+    "producer_run_id"
+  ],
+  "properties": {
+    "fingerprint": { "type": "string" },
+    "cache_version": { "type": "integer" },
+    "role": { "type": "string", "enum": ["outcome", "treatment"] },
+    "target": { "type": "string" },
+    "driver_col": { "type": "string" },
+    "controls": { "type": "array", "items": { "type": "string" } },
+    "train_start": { "type": "string" },
+    "train_end": { "type": "string" },
+    "test_start": { "type": "string" },
+    "test_end": { "type": "string" },
+    "fold_id": { "type": "string" },
+    "source_file": { "type": "string" },
+    "source_data_hash": { "type": "string" },
+    "learner_spec": { "type": "object" },
+    "inner_cv_splits": { "type": "integer" },
+    "seed": { "type": "integer" },
+    "created_at": { "type": "string" },
+    "producer_run_id": { "type": "string" }
+  }
+}

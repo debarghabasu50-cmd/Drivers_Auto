@@ -1,0 +1,118 @@
+{
+  "cache": {
+    "mode": "read_write"
+  },
+  "combinations": {
+    "drivers_per_combo": 3,
+    "max_combinations": 100,
+    "must_include": []
+  },
+  "confounders": {
+    "candidate_pool": [
+      "macro_inflation",
+      "interest_rate",
+      "industry_index"
+    ],
+    "window": "common_train"
+  },
+  "data": {
+    "date_col": "date",
+    "freq": "M",
+    "input_uri": "input/202609/kpi_data.parquet"
+  },
+  "dml": {
+    "cache_version": 1,
+    "inner_cv_splits": 5,
+    "outcome_learner": {
+      "model": "RandomForestRegressor",
+      "params": {
+        "max_depth": 6,
+        "n_estimators": 100,
+        "n_jobs": 1,
+        "random_state": 42
+      }
+    },
+    "seed": 42,
+    "stage2": {
+      "fit_intercept": true,
+      "robust_se": "HC1"
+    },
+    "treatment_learner": {
+      "model": "RandomForestRegressor",
+      "params": {
+        "max_depth": 6,
+        "n_estimators": 100,
+        "n_jobs": 1,
+        "random_state": 42
+      }
+    }
+  },
+  "execution": {
+    "max_parallel_folds": 8,
+    "n_jobs": 1,
+    "retries": 2,
+    "unit_timeout_s": 300
+  },
+  "feature_selection": {
+    "correlation_threshold": 0.15,
+    "lasso_alpha": 0.01,
+    "max_lags": 4,
+    "tier_assignment": {
+      "P0_threshold": 0.35,
+      "P1_threshold": 0.2,
+      "P2_threshold": 0.1
+    }
+  },
+  "folds": [
+    {
+      "fold_id": "f1",
+      "test_end": "2025-03-31",
+      "test_start": "2025-01-01",
+      "train_end": "2024-12-31",
+      "train_start": "2021-01-01"
+    },
+    {
+      "fold_id": "f2",
+      "test_end": "2025-06-30",
+      "test_start": "2025-04-01",
+      "train_end": "2025-03-31",
+      "train_start": "2021-01-01"
+    }
+  ],
+  "kpis": {
+    "exclude": [],
+    "explicit": [],
+    "extra": [
+      "price_index",
+      "competitor_index",
+      "gdp_growth",
+      "lead_time",
+      "marketing_spend"
+    ],
+    "mode": "auto_plus_extra",
+    "tiers": [
+      "P0"
+    ]
+  },
+  "pipeline": {
+    "div": "EL",
+    "name": "driver_analysis"
+  },
+  "source_artifacts": {
+    "confounder_selection_run_id": null,
+    "feature_selection_run_id": null
+  },
+  "steps": {
+    "confounder_selection": "on",
+    "consolidation": "on",
+    "dml": "on",
+    "feature_selection": "on",
+    "reports": "on"
+  },
+  "targets": [
+    {
+      "column": "orders_value",
+      "target_id": "orders"
+    }
+  ]
+}

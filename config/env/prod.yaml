@@ -1,0 +1,14 @@
+storage:
+  account_name: "staprodkpi"
+  container: "driver-analysis-prod"
+  secret_var: "AZURE_STORAGE_CONNECTION_STRING"
+
+azure_ml:
+  subscription_id: "11111111-1111-1111-1111-111111111111"
+  resource_group: "rg-driver-analysis-prod"
+  workspace_name: "aml-driver-analysis-prod"
+  compute_cluster: "cpu-large-prod"
+  environment_name: "driver-analysis-env:prod"
+
+telemetry:
+  app_insights_secret_var: "APP_INSIGHTS_CONNECTION_STRING"

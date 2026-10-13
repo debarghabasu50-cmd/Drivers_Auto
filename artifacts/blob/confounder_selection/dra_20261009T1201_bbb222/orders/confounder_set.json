@@ -1,0 +1,114 @@
+{
+  "feature_selection_run_id": "dra_20261009T1201_bbb222",
+  "run_id": "dra_20261009T1201_bbb222",
+  "step_fp": "d08684d27c24ca43",
+  "target": "orders",
+  "treatments": [
+    {
+      "confounders": [
+        {
+          "kpi": "macro_inflation",
+          "lag": 1,
+          "reason": "mock: candidate pool"
+        },
+        {
+          "kpi": "interest_rate",
+          "lag": 1,
+          "reason": "mock: candidate pool"
+        },
+        {
+          "kpi": "industry_index",
+          "lag": 1,
+          "reason": "mock: candidate pool"
+        }
+      ],
+      "status": "SUCCEEDED",
+      "treatment_kpi": "price_index"
+    },
+    {
+      "confounders": [
+        {
+          "kpi": "macro_inflation",
+          "lag": 1,
+          "reason": "mock: candidate pool"
+        },
+        {
+          "kpi": "interest_rate",
+          "lag": 1,
+          "reason": "mock: candidate pool"
+        },
+        {
+          "kpi": "industry_index",
+          "lag": 1,
+          "reason": "mock: candidate pool"
+        }
+      ],
+      "status": "SUCCEEDED",
+      "treatment_kpi": "competitor_index"
+    },
+    {
+      "confounders": [
+        {
+          "kpi": "macro_inflation",
+          "lag": 1,
+          "reason": "mock: candidate pool"
+        },
+        {
+          "kpi": "interest_rate",
+          "lag": 1,
+          "reason": "mock: candidate pool"
+        },
+        {
+          "kpi": "industry_index",
+          "lag": 1,
+          "reason": "mock: candidate pool"
+        }
+      ],
+      "status": "SUCCEEDED",
+      "treatment_kpi": "gdp_growth"
+    },
+    {
+      "confounders": [
+        {
+          "kpi": "macro_inflation",
+          "lag": 1,
+          "reason": "mock: candidate pool"
+        },
+        {
+          "kpi": "interest_rate",
+          "lag": 1,
+          "reason": "mock: candidate pool"
+        },
+        {
+          "kpi": "industry_index",
+          "lag": 1,
+          "reason": "mock: candidate pool"
+        }
+      ],
+      "status": "SUCCEEDED",
+      "treatment_kpi": "lead_time"
+    },
+    {
+      "confounders": [
+        {
+          "kpi": "macro_inflation",
+          "lag": 1,
+          "reason": "mock: candidate pool"
+        },
+        {
+          "kpi": "interest_rate",
+          "lag": 1,
+          "reason": "mock: candidate pool"
+        },
+        {
+          "kpi": "industry_index",
+          "lag": 1,
+          "reason": "mock: candidate pool"
+        }
+      ],
+      "status": "SUCCEEDED",
+      "treatment_kpi": "marketing_spend"
+    }
+  ],
+  "window": "common_train"
+}

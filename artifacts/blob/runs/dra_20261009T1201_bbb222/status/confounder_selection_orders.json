@@ -1,0 +1,21 @@
+{
+  "attempt": 1,
+  "cache_stats": {},
+  "counters": {
+    "confounder_pool_size": 3,
+    "treatments_analyzed": 5
+  },
+  "ended_at": "2026-10-09T11:22:54.058667+00:00",
+  "error": null,
+  "fold_id": null,
+  "outputs": [
+    "confounder_selection/dra_20261009T1201_bbb222/orders/confounder_set.json"
+  ],
+  "run_id": "dra_20261009T1201_bbb222",
+  "started_at": "2026-10-09T11:22:54.054313+00:00",
+  "status": "SUCCEEDED",
+  "step": "confounder_selection",
+  "target": "orders",
+  "task_id": "confounder_selection_orders",
+  "warnings": []
+}
