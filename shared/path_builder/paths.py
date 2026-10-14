@@ -75,10 +75,24 @@ def get_task_status_path(run_id: str, task_id: str, div: Optional[str] = None, q
     return f"runs/{d}/{q}/{run_id}/status/{task_id}.json"
 
 
-def get_task_log_path(run_id: str, task_id: str, div: Optional[str] = None, quarter: Optional[str] = None) -> str:
-    """Path to individual task execution .log file."""
+def get_task_log_path(
+    run_id: str,
+    task_id: str,
+    div: Optional[str] = None,
+    quarter: Optional[str] = None,
+    attempt: Optional[int] = None,
+) -> str:
+    """Path to individual task execution .log file.
+    If attempt is provided, returns an attempt-specific path to preserve retry history:
+        runs/{d}/{q}/{run_id}/logs/{task_id}_attempt_{attempt}.log
+    Otherwise returns the canonical latest task log path:
+        runs/{d}/{q}/{run_id}/logs/{task_id}.log
+    """
     d, q = resolve_scope(div, quarter)
+    if attempt is not None:
+        return f"runs/{d}/{q}/{run_id}/logs/{task_id}_attempt_{attempt}.log"
     return f"runs/{d}/{q}/{run_id}/logs/{task_id}.log"
+
 
 
 def get_run_log_path(run_id: str, div: Optional[str] = None, quarter: Optional[str] = None) -> str:

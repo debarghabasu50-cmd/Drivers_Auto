@@ -11,12 +11,23 @@ import sys
 import run_pipeline
 from pipelines import run_status
 from shared.path_builder.paths import get_manifest_path
-from shared.schema.contracts import new_run_id
+from shared.schema.contracts import ErrorCategory, PipelineError, new_run_id
 
 
 def run_all(storage=None, run_id: str = None, retries: int = 0, config: str = None) -> str:
     """Returns the run_id. `retries` mimics Airflow retries for retryable (exit code 1) failures."""
     storage = storage or run_pipeline.get_storage_client()
+    if run_id:
+        cfg = run_pipeline.load_repo_config(config)
+        div = cfg.get("pipeline", {}).get("div", "EL")
+        quarter = cfg.get("pipeline", {}).get("quarter", "2026Q3")
+        manifest_path = get_manifest_path(run_id, div=div, quarter=quarter)
+        if storage.exists(manifest_path):
+            raise PipelineError(
+                ErrorCategory.CONFIG,
+                f"run '{run_id}' already exists and is initialized. To resume or run remaining steps, invoke "
+                f"run_pipeline.py with --step <step> --run-id {run_id}. To start a fresh run, omit --run-id or supply a new one.",
+            )
     run_id = run_id or new_run_id()
 
     def step(*argv) -> int:

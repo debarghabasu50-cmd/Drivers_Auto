@@ -35,6 +35,7 @@ class PipelineError(Exception):
     def __init__(self, category: str, message: str):
         super().__init__(message)
         self.category = category
+        self.message = message
 
 
 def new_run_id(now=None, seed: str = None) -> str:

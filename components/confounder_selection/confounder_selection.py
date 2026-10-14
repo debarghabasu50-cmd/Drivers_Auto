@@ -5,6 +5,7 @@ for every treatment KPI, its confounders. Real logic replaces `select_confounder
 from typing import List
 
 from shared.context import StepContext, StepResult
+from shared.logging import logger
 from shared.path_builder.paths import get_confounder_selection_path, get_feature_selection_summary
 
 
@@ -32,7 +33,13 @@ def run_confounder_selection(ctx: StepContext) -> StepResult:
         candidate_pool = [c for c in df.columns if c not in (target_col, ctx.target, date_col) and c not in treatments]
 
     # Confounder selection runs ONCE: selects the common confounder set
+    logger.info(f"selecting confounders for target '{ctx.target}' across {len(treatments)} treatments ({len(candidate_pool)} in candidate pool)",
+                event="COMPUTATION_STARTED", step="confounder_selection", target=ctx.target,
+                pool_size=len(candidate_pool), treatments=len(treatments))
     common_confounders = select_confounders(ctx, candidate_pool)
+    logger.info(f"confounder selection completed for target '{ctx.target}': {len(common_confounders)} selected",
+                event="COMPUTATION_COMPLETED", step="confounder_selection", target=ctx.target,
+                counters={"treatments_analyzed": len(treatments), "confounders_selected": len(common_confounders)})
 
     # Use the same set for each treatment (excluding the treatment driver itself)
     treatment_confounders = [
@@ -58,6 +65,8 @@ def run_confounder_selection(ctx: StepContext) -> StepResult:
     }
     path = get_confounder_selection_path(ctx.run_id, ctx.target, ctx.div, ctx.quarter)
     ctx.storage.write_json(path, payload)
+    logger.info(f"confounder_selection outputs written for target '{ctx.target}'", event="OUTPUT_WRITTEN",
+                outputs=[path], target=ctx.target)
     return StepResult(outputs=[path], counters={
         "treatments_analyzed": len(treatments),
         "confounders_selected": len(common_confounders),

@@ -9,11 +9,15 @@ not touching orchestration.
 """
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
+from datetime import datetime
 
+from shared.logging import logger
 from shared.path_builder.paths import (
     get_confounder_selection_path,
     get_feature_selection_summary,
     get_manifest_path,
+    get_lagged_features_path,
+    get_task_status_path,
     make_task_id,
     set_active_scope,
 )
@@ -74,49 +78,99 @@ class StepContext:
         raise ValueError(f"step '{step}' is not reusable")
 
     def upstream_run_id(self, upstream_step: str, target: Optional[str] = None) -> str:
-        """Run that owns the artifacts of `upstream_step`: this run when the step is on; otherwise a previous
-        run - `source_artifacts.<step>_run_id`, or (if null) the latest run whose artifact fingerprint matches.
-        An incompatible source (other data or config) is rejected, never silently used."""
         if self.config.get("steps", {}).get(upstream_step, "on") != "off":
             return self.run_id
+
         target = target or self.target
-        _, path_of = REUSABLE_STEPS[upstream_step]
+        if not target:
+            raise PipelineError(
+                ErrorCategory.CONFIG, f"target required for '{upstream_step}'"
+            )
+
         expected = self.step_fp(upstream_step)
         src = self.config.get("source_artifacts", {}).get(f"{upstream_step}_run_id")
+
         if src:
-            found = self.require(path_of(src, target, div=self.div, quarter=self.quarter))
-            if found.get("step_fp") != expected:
+            if (
+                self._compatible_source_completion(upstream_step, src, target, expected)
+                is None
+            ):
                 raise PipelineError(
                     ErrorCategory.CONFIG,
                     f"source run {src} is not compatible with this run for '{upstream_step}' "
-                    f"(different data snapshot or config); re-run the step or point to a compatible run")
+                    f"(no completed, compatible artifact found for target '{target}')",
+                )
             return src
+
         src = self._latest_compatible_run(upstream_step, target, expected)
         if src is None:
-            raise PipelineError(ErrorCategory.CONFIG,
-                                f"steps.{upstream_step}='off' but no compatible earlier run was found; "
-                                f"set source_artifacts.{upstream_step}_run_id or run the step")
+            raise PipelineError(
+                ErrorCategory.CONFIG,
+                f"steps.{upstream_step}='off' but no compatible earlier run was found "
+                f"for target '{target}'",
+            )
+
         return src
 
-    def _latest_compatible_run(self, step: str, target: str, expected: str) -> Optional[str]:
-        prefix = f"runs/{self.div}/{self.quarter}/"
-        blobs = self.storage.list_blobs(prefix)
-        candidate_runs = set()
-        for b in blobs:
-            parts = b.replace("\\", "/").split("/")
-            if len(parts) >= 4 and parts[0] == "runs" and parts[1] == self.div and parts[2] == self.quarter:
-                r_id = parts[3]
-                if r_id != self.run_id and not r_id.startswith("_index"):
-                    candidate_runs.add(r_id)
-
-        sorted_runs = sorted(candidate_runs, reverse=True)
+    def _compatible_source_completion(
+        self, step: str, run_id: str, target: str, expected: str
+    ) -> Optional[datetime]:
+        """Return task completion time if this run has a usable artifact set."""
         _, path_of = REUSABLE_STEPS[step]
-        for run in sorted_runs:
-            artifact_path = path_of(run, target, div=self.div, quarter=self.quarter)
-            if self.storage.exists(artifact_path):
-                if self.storage.read_json(artifact_path).get("step_fp") == expected:
-                    return run
-        return None
+        artifact_path = path_of(run_id, target, div=self.div, quarter=self.quarter)
+        status_path = get_task_status_path(
+            run_id, make_task_id(step, target), div=self.div, quarter=self.quarter
+        )
+
+        if not self.storage.exists(artifact_path) or not self.storage.exists(
+            status_path
+        ):
+            return None
+
+        artifact = self.storage.read_json(artifact_path)
+        status = self.storage.read_json(status_path)
+
+        if artifact.get("step_fp") != expected or status.get("status") != "SUCCEEDED":
+            return None
+
+        if step == "feature_selection":
+            lagged_path = get_lagged_features_path(
+                run_id, target, div=self.div, quarter=self.quarter
+            )
+            if not self.storage.exists(lagged_path):
+                return None
+
+        ended_at = status.get("ended_at")
+        if not ended_at:
+            return None
+
+        try:
+            completed = datetime.fromisoformat(ended_at.replace("Z", "+00:00"))
+            return completed if completed.tzinfo is not None else None
+        except ValueError:
+            return None
+
+    def _latest_compatible_run(
+        self, step: str, target: str, expected: str
+    ) -> Optional[str]:
+        prefix = f"runs/{self.div}/{self.quarter}/"
+        candidate_runs = set()
+
+        for blob in self.storage.list_blobs(prefix):
+            parts = blob.replace("\\", "/").split("/")
+            if len(parts) >= 4 and parts[:3] == ["runs", self.div, self.quarter]:
+                if parts[3] != self.run_id:
+                    candidate_runs.add(parts[3])
+
+        matches = []
+        for run_id in candidate_runs:
+            completed = self._compatible_source_completion(
+                step, run_id, target, expected
+            )
+            if completed is not None:
+                matches.append((completed, run_id))
+
+        return max(matches)[1] if matches else None
 
     # ---- inputs ---------------------------------------------------------
     def manifest(self) -> Dict[str, Any]:
@@ -124,29 +178,56 @@ class StepContext:
 
     def load_snapshot(self):
         """Frozen, validated input dataframe of this run."""
-        return self.storage.read_parquet(self.manifest()["snapshot"]["uri"])
+        manifest = self.manifest()
+        snap = manifest.get("snapshot", {})
+        uri = snap.get("uri")
+        snap_id = snap.get("snapshot_id")
+        df = self.storage.read_parquet(uri)
+        logger.log_provenance(
+            source_run_id=self.run_id,
+            path=uri,
+            target=self.target,
+            fingerprint=snap_id,
+            msg=f"loaded snapshot: {uri}",
+            rows=len(df),
+            cols=len(df.columns),
+        )
+        return df
 
     def load_lagged_dataset(self, target: Optional[str] = None):
         """Dataset with lagged features emitted by feature_selection (falls back to snapshot if absent)."""
         import pandas as pd
+
         t = target or self.target
-        df = None
-        if t:
-            try:
-                fs_run = self.upstream_run_id("feature_selection", t)
-                from shared.path_builder.paths import get_lagged_features_path
-                path = get_lagged_features_path(fs_run, t, div=self.div, quarter=self.quarter)
-                if self.storage.exists(path):
-                    df = self.storage.read_parquet(path)
-            except Exception:
-                pass
-        if df is None:
-            df = self.load_snapshot()
-        
-        date_col = self.config.get("data", {}).get("date_col")
+        if not t:
+            raise PipelineError(ErrorCategory.CONFIG, "target required for lagged dataset")
+
+        source_run = self.upstream_run_id("feature_selection", t)
+        path = get_lagged_features_path(
+            source_run, t, div=self.div, quarter=self.quarter
+        )
+        if not self.storage.exists(path):
+            raise PipelineError(
+                ErrorCategory.UPSTREAM_MISSING,
+                f"required lagged dataset missing: {path}"
+            )
+
+        df = self.storage.read_parquet(path)
+        date_col = self.config.get("data", {}).get("date_col", self.config.get("date_col", "date"))
         if date_col and date_col in df.columns:
             df[date_col] = pd.to_datetime(df[date_col])
+
+        logger.log_provenance(
+            source_run_id=source_run,
+            path=path,
+            target=t,
+            fingerprint=self.step_fp("feature_selection"),
+            msg=f"loaded lagged dataset: {path}",
+            rows=len(df),
+            cols=len(df.columns),
+        )
         return df
+        
 
     def fold_spec(self) -> Dict[str, Any]:
         spec = next((f for f in self.config.get("folds", []) if f["fold_id"] == self.fold_id), None)
@@ -158,4 +239,17 @@ class StepContext:
         """Read an upstream JSON artifact or fail with UPSTREAM_MISSING."""
         if not self.storage.exists(path):
             raise PipelineError(ErrorCategory.UPSTREAM_MISSING, f"missing upstream artifact: {path}")
-        return self.storage.read_json(path)
+        data = self.storage.read_json(path)
+        if isinstance(data, dict):
+            source_run = data.get("run_id")
+            step_fp = data.get("step_fp")
+            target_val = data.get("target") or self.target
+            if source_run or step_fp:
+                logger.log_provenance(
+                    source_run_id=source_run or self.run_id,
+                    path=path,
+                    target=target_val,
+                    fingerprint=step_fp,
+                    msg=f"loaded upstream artifact: {path}",
+                )
+        return data

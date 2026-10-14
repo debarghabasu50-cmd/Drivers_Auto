@@ -175,3 +175,276 @@ def test_simplified_cache_unit_key():
         cache_version=2
     )
     assert key_base != key_bumped
+
+
+def test_provenance_and_component_events_logged(tmp_path, capsys):
+    import json
+    import run_pipeline
+    from shared.path_builder.storage import BlobStorageClient
+
+    storage = BlobStorageClient(base_dir=str(tmp_path))
+    run_id = "dra_test_prov_001"
+
+    # Step 1: init_run
+    assert run_pipeline.main(["--step", "init_run", "--run-id", run_id], storage=storage) == 0
+    # Step 2: feature_selection
+    assert run_pipeline.main(["--step", "feature_selection", "--run-id", run_id, "--target", "orders"], storage=storage) == 0
+
+    records = [json.loads(line) for line in capsys.readouterr().out.splitlines() if line.strip().startswith("{")]
+    
+    # Check INPUT_LOADED carries provenance (source_run_id, path, target, fingerprint)
+    input_loaded = [r for r in records if r.get("event") == "INPUT_LOADED"]
+    assert len(input_loaded) > 0
+    snap_loaded = [r for r in input_loaded if "snapshots" in str(r.get("path"))]
+    assert len(snap_loaded) > 0
+    assert snap_loaded[0]["source_run_id"] == run_id
+    assert snap_loaded[0]["fingerprint"].startswith("snap_")
+
+    # Check meaningful component events exist
+    events = {r.get("event") for r in records}
+    assert "COMPUTATION_STARTED" in events
+    assert "COMPUTATION_COMPLETED" in events
+    assert "OUTPUT_WRITTEN" in events
+
+
+def test_preserve_logs_per_retry(tmp_path):
+    import run_pipeline
+    from shared.path_builder.paths import get_task_status_path
+    from shared.path_builder.storage import BlobStorageClient
+
+    storage = BlobStorageClient(base_dir=str(tmp_path))
+    run_id = "dra_test_retry_log"
+
+    # Run attempt 1
+    run_pipeline.main(["--step", "init_run", "--run-id", run_id, "--attempt", "1"], storage=storage)
+    log_canonical = get_task_log_path(run_id, "init_run", div="EL", quarter="2026Q3")
+    log_attempt1 = get_task_log_path(run_id, "init_run", div="EL", quarter="2026Q3", attempt=1)
+
+    assert storage.exists(log_canonical)
+    assert storage.exists(log_attempt1)
+    text1 = storage.read_text(log_attempt1)
+    assert "[init_run]" in text1
+
+    # Run attempt 2 (retry)
+    run_pipeline.main(["--step", "init_run", "--run-id", run_id, "--attempt", "2"], storage=storage)
+    log_attempt2 = get_task_log_path(run_id, "init_run", div="EL", quarter="2026Q3", attempt=2)
+
+    assert storage.exists(log_attempt2)
+    # Attempt 1 log file must still be preserved!
+    assert storage.exists(log_attempt1)
+    assert storage.read_text(log_attempt1) == text1
+
+    # Status file remains as latest state
+    status_path = get_task_status_path(run_id, "init_run", div="EL", quarter="2026Q3")
+    st = storage.read_json(status_path)
+    assert st["attempt"] == 2
+
+
+def test_status_write_failure_is_unmistakable(tmp_path, monkeypatch, capsys):
+    import json
+    import run_pipeline
+    from shared.path_builder.storage import BlobStorageClient
+
+    storage = BlobStorageClient(base_dir=str(tmp_path))
+    run_id = "dra_test_status_fail"
+
+    orig_write_json = storage.write_json
+
+    def flaky_write_json(path, data, **kwargs):
+        if "status/" in path:
+            raise OSError("disk quota exceeded or blob write timeout")
+        return orig_write_json(path, data, **kwargs)
+
+    monkeypatch.setattr(storage, "write_json", flaky_write_json)
+
+    code = run_pipeline.main(["--step", "init_run", "--run-id", run_id], storage=storage)
+    # Must return retryable exit code 1
+    assert code == 1
+
+    captured = capsys.readouterr()
+    # Stderr must contain unmistakable critical message
+    assert "CRITICAL: Failed to write" in captured.err
+    # Stdout must contain structured STATUS_WRITE_FAILED event
+    lines = [json.loads(l) for l in captured.out.splitlines() if l.strip().startswith("{")]
+    status_fails = [l for l in lines if l.get("event") == "STATUS_WRITE_FAILED"]
+    assert len(status_fails) > 0
+    assert status_fails[0]["error_category"] == "INFRA_TRANSIENT"
+    assert "status_path" in status_fails[0]
+
+
+def test_consolidation_failure_sets_terminal_manifest_and_stopping_rule(tmp_path, monkeypatch):
+    import run_pipeline
+    from pipelines import run_status
+    from run_local import run_all
+    from shared.path_builder.storage import BlobStorageClient
+
+    storage = BlobStorageClient(base_dir=str(tmp_path))
+    run_id = run_all(storage)
+
+    # Initially, completed run is terminal
+    assert run_status.is_run_terminal(storage, run_id) is True
+
+    # Now test a run where consolidation crashes unexpectedly during execution
+    run_id2 = "dra_test_cons_fail"
+    run_pipeline.main(["--step", "init_run", "--run-id", run_id2], storage=storage)
+
+    # Midrun: manifest is RUNNING, not terminal
+    assert run_status.is_run_terminal(storage, run_id2) is False
+
+    # Simulate an unexpected error inside consolidation
+    def bad_collect(*args, **kwargs):
+        raise RuntimeError("simulated unexpected crash in consolidation")
+
+    monkeypatch.setattr("pipelines.consolidate._collect_statuses", bad_collect)
+    
+    # Run consolidate (which triggers the crash)
+    code = run_pipeline.main(["--step", "consolidate", "--run-id", run_id2], storage=storage)
+    assert code != 0  # Failed
+
+    # Manifest MUST have been updated with terminal status "FAILED"!
+    manifest = storage.read_json(get_manifest_path(run_id2, "EL", "2026Q3"))
+    assert manifest["status"] == "FAILED"
+    assert manifest.get("end_time") is not None
+
+    # run_status.is_run_terminal must now return True so --watch stops refreshing!
+    assert run_status.is_run_terminal(storage, run_id2) is True
+
+
+def test_lagged_data_fails_loudly_when_missing(tmp_path):
+    import pytest
+    import run_pipeline
+    from pipelines.init_run import load_repo_config
+    from shared.context import StepContext
+    from shared.path_builder.storage import BlobStorageClient
+    from shared.schema.contracts import ErrorCategory, PipelineError
+
+    storage = BlobStorageClient(base_dir=str(tmp_path))
+    config = load_repo_config()
+    run_id = "dra_test_lag_loud"
+
+    # Initialize run so manifest exists
+    assert run_pipeline.main(["--step", "init_run", "--run-id", run_id], storage=storage) == 0
+
+    ctx = StepContext(run_id=run_id, step="dml", config=config, storage=storage, attempt=1)
+
+    # Calling without target raises CONFIG
+    with pytest.raises(PipelineError) as exc_cfg:
+        ctx.load_lagged_dataset()
+    assert exc_cfg.value.category == ErrorCategory.CONFIG
+
+    # Calling with target when lagged features parquet doesn't exist raises UPSTREAM_MISSING
+    with pytest.raises(PipelineError) as exc_up:
+        ctx.load_lagged_dataset(target="orders")
+    assert exc_up.value.category == ErrorCategory.UPSTREAM_MISSING
+    assert "required lagged dataset missing" in exc_up.value.message
+
+
+def test_candidate_resolution_orders_by_ended_at_and_rejects_incomplete_artifacts(tmp_path):
+    from pipelines.init_run import load_repo_config
+    from shared.context import StepContext
+    from shared.path_builder.paths import (
+        get_feature_selection_summary,
+        get_lagged_features_path,
+        get_task_status_path,
+    )
+    from shared.path_builder.storage import BlobStorageClient
+    import pandas as pd
+
+    storage = BlobStorageClient(base_dir=str(tmp_path))
+    config = load_repo_config()
+
+    target = "orders"
+    expected_fp = "expected_step_fp_123"
+
+    # Context for a new run trying to resolve feature_selection
+    current_run = "dra_20261014T1200_current"
+    ctx = StepContext(run_id=current_run, step="dml", config=config, storage=storage, target=target)
+
+    # Monkeypatch ctx.step_fp so expected matches
+    ctx.step_fp = lambda step: expected_fp
+
+    # Create run_001 (alphabetically earlier, but finished LATER at 14:00)
+    # Create run_999 (alphabetically later, but finished EARLIER at 10:00)
+    run_earlier_name = "dra_run_001"
+    run_later_name = "dra_run_999"
+
+    for r_id, ended_at in [(run_earlier_name, "2026-10-14T14:00:00+00:00"), (run_later_name, "2026-10-14T10:00:00+00:00")]:
+        storage.write_json(
+            get_feature_selection_summary(r_id, target, div="EL", quarter="2026Q3"),
+            {"run_id": r_id, "target": target, "step_fp": expected_fp},
+        )
+        storage.write_json(
+            get_task_status_path(r_id, f"feature_selection_{target}", div="EL", quarter="2026Q3"),
+            {"status": "SUCCEEDED", "ended_at": ended_at},
+        )
+        storage.write_parquet(
+            get_lagged_features_path(r_id, target, div="EL", quarter="2026Q3"),
+            pd.DataFrame({"date": ["2026-01-01"], "orders": [10]}),
+        )
+
+    # Automatic candidate resolution must choose run_earlier_name because its ended_at (14:00) > run_later_name (10:00)
+    resolved = ctx._latest_compatible_run("feature_selection", target, expected_fp)
+    assert resolved == run_earlier_name
+
+    # Incomplete artifact set: remove lagged features parquet from run_earlier_name
+    lag_earlier = get_lagged_features_path(run_earlier_name, target, div="EL", quarter="2026Q3")
+    storage._path(lag_earlier).unlink()
+
+    # Now it must reject run_earlier_name and resolve run_later_name instead
+    resolved_fallback = ctx._latest_compatible_run("feature_selection", target, expected_fp)
+    assert resolved_fallback == run_later_name
+
+    # If run_later_name status is not SUCCEEDED, it must reject both and return None
+    storage.write_json(
+        get_task_status_path(run_later_name, f"feature_selection_{target}", div="EL", quarter="2026Q3"),
+        {"status": "FAILED", "ended_at": "2026-10-14T10:00:00+00:00"},
+    )
+    assert ctx._latest_compatible_run("feature_selection", target, expected_fp) is None
+
+
+def test_reinitialization_guards(tmp_path):
+    import pytest
+    import run_pipeline
+    from pipelines.init_run import load_repo_config
+    from run_local import run_all
+    from shared.context import StepContext
+    from shared.path_builder.paths import get_manifest_path
+    from shared.path_builder.storage import BlobStorageClient
+    from shared.schema.contracts import ErrorCategory, PipelineError
+
+    storage = BlobStorageClient(base_dir=str(tmp_path))
+    run_id = "dra_test_guard_001"
+
+    # Run full pipeline with explicit run_id
+    run_all(storage, run_id=run_id)
+
+    # Calling run_all with the same run_id must raise PipelineError(CONFIG)
+    with pytest.raises(PipelineError) as exc_local:
+        run_all(storage, run_id=run_id)
+    assert exc_local.value.category == ErrorCategory.CONFIG
+    assert "already exists and is initialized" in exc_local.value.message
+
+    # Attempt 1 of init_run on existing run must raise CONFIG error
+    config = load_repo_config()
+    ctx1 = StepContext(run_id=run_id, step="init_run", config=config, storage=storage, attempt=1)
+    with pytest.raises(PipelineError) as exc_init1:
+        run_pipeline.STEPS["init_run"].fn(ctx1)
+    assert exc_init1.value.category == ErrorCategory.CONFIG
+    assert "already initialized" in exc_init1.value.message
+
+    # Attempt > 1 of init_run on an already terminal run (SUCCEEDED) must raise CONFIG error
+    ctx2 = StepContext(run_id=run_id, step="init_run", config=config, storage=storage, attempt=2)
+    with pytest.raises(PipelineError) as exc_init2:
+        run_pipeline.STEPS["init_run"].fn(ctx2)
+    assert exc_init2.value.category == ErrorCategory.CONFIG
+    assert "already completed" in exc_init2.value.message
+
+    # But for a non-terminal run (e.g. RUNNING), attempt 2 retry of init_run is allowed
+    incomplete_run = "dra_incomplete_002"
+    run_pipeline.main(["--step", "init_run", "--run-id", incomplete_run, "--attempt", "1"], storage=storage)
+    m = storage.read_json(get_manifest_path(incomplete_run, "EL", "2026Q3"))
+    assert m["status"] == "RUNNING"
+    code = run_pipeline.main(["--step", "init_run", "--run-id", incomplete_run, "--attempt", "2"], storage=storage)
+    assert code == 0
+
+

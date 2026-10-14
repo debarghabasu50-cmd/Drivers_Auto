@@ -29,8 +29,14 @@ def run_feature_selection(ctx: StepContext) -> StepResult:
     date_col = ctx.config["data"]["date_col"]
     column = next(t["column"] for t in ctx.config["targets"] if t["target_id"] == ctx.target)
 
+    logger.info(f"evaluating KPI drivers for target '{ctx.target}'", event="COMPUTATION_STARTED",
+                step="feature_selection", target=ctx.target,
+                kpi_candidates=len(ctx.config.get("kpis", {}).get("extra", [])))
     decisions = select_kpis(ctx, df)
     selected = [d["kpi"] for d in decisions if d["included"]]
+    logger.info(f"selected {len(selected)} KPI drivers for target '{ctx.target}'", event="COMPUTATION_COMPLETED",
+                step="feature_selection", target=ctx.target,
+                counters={"kpis_evaluated": len(decisions), "kpis_selected": len(selected)})
 
     matrix = df[[date_col, column]].rename(columns={column: ctx.target}).copy()
     lagged_df = df.copy()
@@ -61,5 +67,7 @@ def run_feature_selection(ctx: StepContext) -> StepResult:
             outputs.append(report_path)
         except Exception as exc:
             logger.warning(f"fs report failed (non-blocking): {exc}", event="REPORT_FAILED")
+    logger.info(f"feature_selection outputs written for target '{ctx.target}'", event="OUTPUT_WRITTEN",
+                outputs=outputs, target=ctx.target)
     return StepResult(outputs=outputs,
                       counters={"kpis_evaluated": len(decisions), "kpis_selected": len(selected)})

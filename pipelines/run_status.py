@@ -64,6 +64,32 @@ def render(storage, run_id: str, div: Optional[str] = None, quarter: Optional[st
     return "\n".join(lines)
 
 
+def is_run_terminal(storage, run_id: str, div: Optional[str] = None, quarter: Optional[str] = None) -> bool:
+    """Check if the run has reached a terminal status (from manifest or consolidate task status)."""
+    manifest_path = get_manifest_path(run_id, div, quarter)
+    if not storage.exists(manifest_path):
+        matching = [b for b in storage.list_blobs("runs/") if b.replace("\\", "/").endswith(f"/{run_id}/run_manifest.json")]
+        if matching:
+            manifest_path = matching[0]
+        else:
+            return False
+    try:
+        manifest = storage.read_json(manifest_path)
+        if manifest.get("status") in ("SUCCEEDED", "PARTIAL", "FAILED"):
+            return True
+        # Safety check: if consolidate task status is terminal
+        d = manifest.get("plan", {}).get("div", div)
+        q = manifest.get("plan", {}).get("quarter", quarter)
+        cons_path = get_task_status_path(run_id, "consolidate", d, q)
+        if storage.exists(cons_path):
+            cons_st = storage.read_json(cons_path)
+            if cons_st.get("status") in ("SUCCEEDED", "PARTIAL", "FAILED"):
+                return True
+    except Exception:
+        pass
+    return False
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description="Show pipeline run status")
     parser.add_argument("--run-id", required=True)
@@ -78,10 +104,11 @@ def main(argv=None) -> int:
         if args.watch:
             sys.stdout.write("\033[2J\033[H")
         print(output)
-        if not args.watch or "status=SUCCEEDED" in output or "status=FAILED" in output or "status=PARTIAL" in output:
+        if not args.watch or is_run_terminal(storage, args.run_id, args.div, args.quarter):
             break
         time.sleep(args.watch)
     return 0
+
 
 
 if __name__ == "__main__":
