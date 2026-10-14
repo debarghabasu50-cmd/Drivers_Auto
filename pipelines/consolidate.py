@@ -12,6 +12,7 @@ T5 consolidate - the LAST step of every run (always runs, even after failures or
 Final run status: SUCCEEDED (everything planned is complete) | PARTIAL (something failed/missing, results
 exist) | FAILED (no usable output). The consolidate *task* itself succeeds in all three cases.
 """
+import traceback
 from datetime import datetime, timezone
 from typing import Any, Dict, List
 
@@ -83,119 +84,157 @@ def run_consolidation(ctx: StepContext) -> StepResult:
     dml_tasks = [t for t in tasks if t["step"] == "dml"]
     statuses = _collect_statuses(ctx, tasks)
 
-    frames, unreadable = [], []
-    for t in dml_tasks if dml_on else []:
-        path = get_dml_result_path(ctx.run_id, t["target"], t["fold_id"], ctx.div, ctx.quarter)
-        if statuses[t["task_id"]]["status"] in OK_STATUSES and storage.exists(path):
-            try:
-                frames.append(storage.read_parquet(path))
-            except Exception as exc:
-                unreadable.append(t["task_id"])
-                logger.warning(f"cannot read {path}: {exc}", event="FOLD_RESULT_UNREADABLE", error_category="UNKNOWN")
+    try:
+        frames, unreadable = [], []
+        for t in dml_tasks if dml_on else []:
+            path = get_dml_result_path(ctx.run_id, t["target"], t["fold_id"], ctx.div, ctx.quarter)
+            if statuses[t["task_id"]]["status"] in OK_STATUSES and storage.exists(path):
+                try:
+                    frames.append(storage.read_parquet(path))
+                except Exception as exc:
+                    unreadable.append(t["task_id"])
+                    logger.warning(f"cannot read {path}: {exc}", event="FOLD_RESULT_UNREADABLE", error_category="UNKNOWN")
 
-    outputs, published_run_path = [], None
-    result = None
-    present = failed = 0
-    if frames:
-        result = _union_with_aggregates(frames)
-        present, failed = len(result), int((result["status"] != "SUCCEEDED").sum())
+        logger.info(f"loaded {len(frames)} fold results for consolidation", event="INPUT_LOADED",
+                    folds_loaded=len(frames))
 
-    expected = _expected_rows(ctx, dml_tasks) if dml_on else 0
-    bad_tasks = sorted({k for k, s in statuses.items() if s["status"] not in OK_STATUSES} | set(unreadable))
-    partial_tasks = sorted(k for k, s in statuses.items() if s["status"] == "PARTIAL")
-    missing_folds = sorted(t["task_id"] for t in dml_tasks
-                           if dml_on and (statuses[t["task_id"]]["status"] not in OK_STATUSES or t["task_id"] in unreadable))
-    completeness = {
-        "expected_folds": len(dml_tasks) if dml_on else 0,
-        "completed_folds": (len(dml_tasks) - len(missing_folds)) if dml_on else 0,
-        "expected_rows": expected, "present_rows": present, "failed_rows": failed,
-        "failed_tasks": bad_tasks, "partial_tasks": partial_tasks,
-    }
+        outputs, published_run_path = [], None
+        result = None
+        present = failed = 0
+        if frames:
+            result = _union_with_aggregates(frames)
+            present, failed = len(result), int((result["status"] != "SUCCEEDED").sum())
 
-    if dml_on and present == 0:
-        run_status = "FAILED"
-    elif not dml_on and bad_tasks:
-        run_status = "FAILED"
-    elif bad_tasks or partial_tasks or failed or present < expected:
-        run_status = "PARTIAL"
-    else:
-        run_status = "SUCCEEDED"
-
-    # Consumer serving layer publishing
-    published_latest_path = None
-    if publish and result is not None:
-        published_run_path = get_published_result_path(ctx.run_id, ctx.div, ctx.quarter)
-        published_latest_path = get_published_latest_path(ctx.div, ctx.quarter)
-        
-        # 1. Write immutable run-specific output
-        storage.write_parquet(published_run_path, result)
-        # 2. Update consumer serving 'latest' pointer
-        storage.write_parquet(published_latest_path, result)
-
-        # 3. Write metadata descriptor run_info.json
-        run_info = {
-            "run_id": ctx.run_id,
-            "div": ctx.div,
-            "quarter": ctx.quarter,
-            "published_at": datetime.now(timezone.utc).isoformat(),
-            "status": run_status,
-            "present_rows": present,
-            "expected_rows": expected,
-            "failed_rows": failed,
-            "manifest_uri": get_manifest_path(ctx.run_id, ctx.div, ctx.quarter)
+        expected = _expected_rows(ctx, dml_tasks) if dml_on else 0
+        bad_tasks = sorted({k for k, s in statuses.items() if s["status"] not in OK_STATUSES} | set(unreadable))
+        partial_tasks = sorted(k for k, s in statuses.items() if s["status"] == "PARTIAL")
+        missing_folds = sorted(t["task_id"] for t in dml_tasks
+                               if dml_on and (statuses[t["task_id"]]["status"] not in OK_STATUSES or t["task_id"] in unreadable))
+        completeness = {
+            "expected_folds": len(dml_tasks) if dml_on else 0,
+            "completed_folds": (len(dml_tasks) - len(missing_folds)) if dml_on else 0,
+            "expected_rows": expected, "present_rows": present, "failed_rows": failed,
+            "failed_tasks": bad_tasks, "partial_tasks": partial_tasks,
         }
-        storage.write_json(get_published_run_info_path(ctx.run_id, ctx.div, ctx.quarter), run_info)
-        storage.write_json(get_published_latest_run_info_path(ctx.div, ctx.quarter), run_info)
 
-        outputs.extend([published_run_path, published_latest_path])
+        if dml_on and present == 0:
+            run_status = "FAILED"
+        elif not dml_on and bad_tasks:
+            run_status = "FAILED"
+        elif bad_tasks or partial_tasks or failed or present < expected:
+            run_status = "PARTIAL"
+        else:
+            run_status = "SUCCEEDED"
 
-    report_status = "SKIPPED"
-    if publish and toggles.get("reports", "on") == "on":
-        try:
-            report_run_path = get_report_path("dml", ctx.run_id, ctx.div, ctx.quarter)
-            report_latest_path = get_report_latest_path("dml", ctx.div, ctx.quarter)
-            sheets = {
-                "results": result if result is not None else pd.DataFrame({"note": ["no DML results"]}),
-                "completeness": pd.DataFrame([{k: str(v) for k, v in completeness.items()}]),
-                "tasks": pd.DataFrame([{"task_id": k, "status": s["status"],
-                                        "error": (s.get("error") or {}).get("category")} for k, s in statuses.items()]),
+        logger.info(f"consolidation aggregation completed: {present} present rows, {expected} expected rows",
+                    event="COMPUTATION_COMPLETED", step="consolidate",
+                    counters={"present_rows": present, "expected_rows": expected, "failed_rows": failed})
+
+        # Consumer serving layer publishing
+        published_latest_path = None
+        if publish and result is not None:
+            published_run_path = get_published_result_path(ctx.run_id, ctx.div, ctx.quarter)
+            published_latest_path = get_published_latest_path(ctx.div, ctx.quarter)
+            
+            # 1. Write immutable run-specific output
+            storage.write_parquet(published_run_path, result)
+            # 2. Update consumer serving 'latest' pointer
+            storage.write_parquet(published_latest_path, result)
+
+            # 3. Write metadata descriptor run_info.json
+            run_info = {
+                "run_id": ctx.run_id,
+                "div": ctx.div,
+                "quarter": ctx.quarter,
+                "published_at": datetime.now(timezone.utc).isoformat(),
+                "status": run_status,
+                "present_rows": present,
+                "expected_rows": expected,
+                "failed_rows": failed,
+                "manifest_uri": get_manifest_path(ctx.run_id, ctx.div, ctx.quarter)
             }
-            write_xlsx(storage, report_run_path, sheets)
-            write_xlsx(storage, report_latest_path, sheets)
-            outputs.extend([report_run_path, report_latest_path])
-            report_status = "SUCCEEDED"
-        except Exception as exc:
-            report_status = "FAILED"
-            logger.warning(f"report generation failed (non-blocking): {exc}", event="REPORT_FAILED")
+            storage.write_json(get_published_run_info_path(ctx.run_id, ctx.div, ctx.quarter), run_info)
+            storage.write_json(get_published_latest_run_info_path(ctx.div, ctx.quarter), run_info)
 
-    reused = {k: s["counters"]["reused_from"] for k, s in statuses.items() if s.get("counters", {}).get("reused_from")}
-    end = datetime.now(timezone.utc).isoformat()
-    manifest.update(
-        status=run_status, end_time=end, steps=statuses, completeness=completeness,
-        lineage={
-            "published": published_run_path,
-            "published_latest": published_latest_path,
-            "report_status": report_status,
-            "reused_from": reused
+            outputs.extend([published_run_path, published_latest_path])
+
+        report_status = "SKIPPED"
+        if publish and toggles.get("reports", "on") == "on":
+            try:
+                report_run_path = get_report_path("dml", ctx.run_id, ctx.div, ctx.quarter)
+                report_latest_path = get_report_latest_path("dml", ctx.div, ctx.quarter)
+                sheets = {
+                    "results": result if result is not None else pd.DataFrame({"note": ["no DML results"]}),
+                    "completeness": pd.DataFrame([{k: str(v) for k, v in completeness.items()}]),
+                    "tasks": pd.DataFrame([{"task_id": k, "status": s["status"],
+                                            "error": (s.get("error") or {}).get("category")} for k, s in statuses.items()]),
+                }
+                write_xlsx(storage, report_run_path, sheets)
+                write_xlsx(storage, report_latest_path, sheets)
+                outputs.extend([report_run_path, report_latest_path])
+                report_status = "SUCCEEDED"
+            except Exception as exc:
+                report_status = "FAILED"
+                logger.warning(f"report generation failed (non-blocking): {exc}", event="REPORT_FAILED")
+
+        reused = {k: s["counters"]["reused_from"] for k, s in statuses.items() if s.get("counters", {}).get("reused_from")}
+        end = datetime.now(timezone.utc).isoformat()
+        manifest.update(
+            status=run_status, end_time=end, steps=statuses, completeness=completeness,
+            lineage={
+                "published": published_run_path,
+                "published_latest": published_latest_path,
+                "report_status": report_status,
+                "reused_from": reused
+            }
+        )
+        manifest_path = get_manifest_path(ctx.run_id, ctx.div, ctx.quarter)
+        storage.write_json(manifest_path, manifest)
+        
+        index_path = get_run_index_path(ctx.run_id, ctx.div, ctx.quarter)
+        index_record = {
+            "run_id": ctx.run_id, "div": ctx.div, "quarter": ctx.quarter, "status": run_status,
+            "start_time": manifest["start_time"], "end_time": end,
+            "snapshot_id": manifest["snapshot"].get("snapshot_id"),
+            "config_version": manifest["config"].get("config_version"),
+            "image": manifest.get("image"), "published": published_run_path, "reused_from": reused,
         }
-    )
-    manifest_path = get_manifest_path(ctx.run_id, ctx.div, ctx.quarter)
-    storage.write_json(manifest_path, manifest)
-    
-    index_path = get_run_index_path(ctx.run_id, ctx.div, ctx.quarter)
-    index_record = {
-        "run_id": ctx.run_id, "div": ctx.div, "quarter": ctx.quarter, "status": run_status,
-        "start_time": manifest["start_time"], "end_time": end,
-        "snapshot_id": manifest["snapshot"].get("snapshot_id"),
-        "config_version": manifest["config"].get("config_version"),
-        "image": manifest.get("image"), "published": published_run_path, "reused_from": reused,
-    }
-    storage.write_json(index_path, index_record)
-    storage.write_json(f"runs/_index/{ctx.run_id}.json", index_record)
-    outputs.append(manifest_path)
+        storage.write_json(index_path, index_record)
+        storage.write_json(f"runs/_index/{ctx.run_id}.json", index_record)
+        outputs.append(manifest_path)
 
-    logger.info(f"run {ctx.run_id} closed as {run_status} (div={ctx.div}, quarter={ctx.quarter})", event="RUN_CLOSED",
-                counters={"present_rows": present, "expected_rows": expected, "failed_tasks": len(bad_tasks)})
-    return StepResult(outputs=outputs, counters={"run_status": run_status, **{
-        k: v for k, v in completeness.items() if isinstance(v, int)}, "report_status": report_status},
-        warnings=[f"run finished {run_status}"] if run_status != "SUCCEEDED" else [])
+        logger.info(f"consolidate outputs written", event="OUTPUT_WRITTEN", outputs=outputs)
+        logger.info(f"run {ctx.run_id} closed as {run_status} (div={ctx.div}, quarter={ctx.quarter})", event="RUN_CLOSED",
+                    counters={"present_rows": present, "expected_rows": expected, "failed_tasks": len(bad_tasks)})
+        return StepResult(outputs=outputs, counters={"run_status": run_status, **{
+            k: v for k, v in completeness.items() if isinstance(v, int)}, "report_status": report_status},
+            warnings=[f"run finished {run_status}"] if run_status != "SUCCEEDED" else [])
+
+    except Exception as exc:
+        logger.error(f"consolidation encountered fatal error: {exc}", event="CONSOLIDATE_FAILED",
+                     error_category="CODE_BUG", exc=traceback.format_exc())
+        # Ensure terminal manifest status is always set on failure paths!
+        try:
+            end = datetime.now(timezone.utc).isoformat()
+            manifest.update(
+                status="FAILED", end_time=end, steps=statuses,
+                lineage={"error": str(exc), "traceback": traceback.format_exc()}
+            )
+            manifest_path = get_manifest_path(ctx.run_id, ctx.div, ctx.quarter)
+            storage.write_json(manifest_path, manifest)
+            index_path = get_run_index_path(ctx.run_id, ctx.div, ctx.quarter)
+            index_record = {
+                "run_id": ctx.run_id, "div": ctx.div, "quarter": ctx.quarter, "status": "FAILED",
+                "start_time": manifest.get("start_time"), "end_time": end,
+                "snapshot_id": manifest.get("snapshot", {}).get("snapshot_id"),
+                "config_version": manifest.get("config", {}).get("config_version"),
+                "image": manifest.get("image"),
+                "error": str(exc),
+            }
+            storage.write_json(index_path, index_record)
+            storage.write_json(f"runs/_index/{ctx.run_id}.json", index_record)
+        except Exception as m_exc:
+            logger.error(f"failed to set terminal status on manifest during consolidation error: {m_exc}",
+                         event="STATUS_WRITE_FAILED")
+        raise
+

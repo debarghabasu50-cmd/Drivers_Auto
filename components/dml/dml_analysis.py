@@ -155,6 +155,8 @@ def run_dml_fold(ctx: StepContext) -> StepResult:
 
     to_fit = [by_key[k] for k in sorted(misses)]
     every = max(1, len(to_fit) // 20)
+    logger.info(f"stage-1 fitting started for target '{ctx.target}', fold '{ctx.fold_id}': {len(to_fit)} units to fit",
+                event="STAGE1_STARTED", units_to_fit=len(to_fit))
     for i, (unit, res) in enumerate(zip(to_fit, _iter_fits(to_fit, train, test, date_col, n_jobs)), 1):
         key = unit["unit_key"]
         if res[0] == "err":
@@ -181,7 +183,14 @@ def run_dml_fold(ctx: StepContext) -> StepResult:
             logger.info(f"stage-1 progress {i}/{len(to_fit)}", event="STAGE1_PROGRESS",
                         counters={"fitted": i, "to_fit": len(to_fit)})
 
+    failed_units = sum(1 for s in unit_status.values() if s["status"] == "FAILED")
+    logger.info(f"stage-1 fitting completed for target '{ctx.target}', fold '{ctx.fold_id}'",
+                event="STAGE1_COMPLETED", counters={"units_total": len(by_key), "cache_hits": len(hits),
+                                                   "units_fitted": len(to_fit) - failed_units, "units_failed": failed_units})
+
     # Stage 2: one row per (combination, driver). Rows whose units failed are marked FAILED, never dropped.
+    logger.info(f"stage-2 estimation started for target '{ctx.target}', fold '{ctx.fold_id}': {len(row_plan)} rows planned",
+                event="STAGE2_STARTED", rows_planned=len(row_plan))
     rows = []
     for plan in row_plan:
         o_key, t_key = plan["outcome_unit"], plan["treatment_unit"]
@@ -200,6 +209,10 @@ def run_dml_fold(ctx: StepContext) -> StepResult:
             row["error"] = f"{exc.category}: {exc}"
         rows.append(row)
 
+    failed_rows = sum(1 for r in rows if r["status"] == "FAILED")
+    logger.info(f"stage-2 estimation completed for target '{ctx.target}', fold '{ctx.fold_id}': {len(rows) - failed_rows} succeeded, {failed_rows} failed",
+                event="STAGE2_COMPLETED", counters={"rows_total": len(rows), "rows_succeeded": len(rows) - failed_rows, "rows_failed": failed_rows})
+
     refs = pd.DataFrame([{"unit_key": u["unit_key"], "role": u["role"], "variable": u["variable"],
                           "controls": ",".join(u["controls"]), **unit_status[u["unit_key"]]}
                          for u in by_key.values()])
@@ -207,6 +220,8 @@ def run_dml_fold(ctx: StepContext) -> StepResult:
     refs_path = get_stage1_refs_path(ctx.run_id, ctx.target, ctx.fold_id, ctx.div, ctx.quarter)
     storage.write_parquet(result_path, pd.DataFrame(rows))
     storage.write_parquet(refs_path, refs)
+    logger.info(f"dml outputs written for target '{ctx.target}', fold '{ctx.fold_id}'", event="OUTPUT_WRITTEN",
+                outputs=[result_path, refs_path], target=ctx.target, fold_id=ctx.fold_id)
 
     failed_units = sum(1 for s in unit_status.values() if s["status"] == "FAILED")
     failed_rows = sum(1 for r in rows if r["status"] == "FAILED")

@@ -1,0 +1,48 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Local test & mock storage
+.mock_blob/
+artifacts/
+*.log
+
+# Run artifacts (if created in repo directory outside mock_blob)
+runs/
+snapshots/
+published/
+reports/
+cache/
+
+# Testing & coverage
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# IDEs and editors
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS generated files
+.DS_Store
+Thumbs.db
+ehthumbs.db
+[Dd]esktop.ini
+
+# Jupyter Notebook checkpoints & temp files
+.ipynb_checkpoints
+tmp/
+scratch/

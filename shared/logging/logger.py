@@ -121,3 +121,27 @@ def warning(msg: str, event: str = "WARNING", error_category: Optional[str] = No
 def error(msg: str, event: str = "FAILED", error_category: Optional[str] = "UNKNOWN",
           exc: Optional[str] = None, **fields: Any) -> None:
     log_event(event=event, msg=msg, level="ERROR", error_category=error_category, exc=exc, **fields)
+
+
+def log_provenance(
+    source_run_id: Optional[str],
+    path: str,
+    target: Optional[str] = None,
+    fingerprint: Optional[str] = None,
+    msg: Optional[str] = None,
+    event: str = "INPUT_LOADED",
+    **fields: Any,
+) -> None:
+    """Log input provenance at point of use (source_run_id, path, target, fingerprint)."""
+    message = msg or f"loaded input: {path}"
+    log_event(
+        event=event,
+        msg=message,
+        level="INFO",
+        source_run_id=source_run_id,
+        path=path,
+        target=target or _CTX.get("target"),
+        fingerprint=fingerprint,
+        **fields,
+    )
+

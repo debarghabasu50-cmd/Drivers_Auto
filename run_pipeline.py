@@ -32,6 +32,7 @@ from pipelines.init_run import load_repo_config, run_init
 from shared.context import REUSABLE_STEPS as REUSABLE, StepContext, StepResult
 from shared.logging import logger
 from shared.path_builder.paths import (
+    get_manifest_path,
     get_master_config_path,
     get_task_log_path,
     get_task_status_path,
@@ -131,7 +132,17 @@ def main(argv=None, storage=None) -> int:
                                 + (" and --fold-id" if spec.needs_fold else ""))
         config = _load_config(args.step, args.run_id, storage, args.config)
         status_path = get_task_status_path(args.run_id, task_id)
-        storage.write_json(status_path, status.to_dict())  # live visibility: task is RUNNING
+        try:
+            storage.write_json(status_path, status.to_dict())  # live visibility: task is RUNNING
+        except Exception as write_exc:
+            msg = f"CRITICAL: Failed to write initial RUNNING status file {status_path}: {write_exc}"
+            sys.stderr.write(f"{msg}\n")
+            sys.stderr.flush()
+            logger.error(msg, event="STATUS_WRITE_FAILED",
+                         error_category=ErrorCategory.INFRA_TRANSIENT,
+                         status_path=status_path, intended_status="RUNNING",
+                         exc=traceback.format_exc())
+            raise PipelineError(ErrorCategory.INFRA_TRANSIENT, msg) from write_exc
         logger.info(f"task started: {task_id}", event="TASK_STARTED")
 
         ctx = StepContext(run_id=args.run_id, step=args.step, config=config, storage=storage,
@@ -140,9 +151,19 @@ def main(argv=None, storage=None) -> int:
             result = StepResult(status="SKIPPED", warnings=[f"steps.{spec.toggle}=off"])
             if args.step in REUSABLE:
                 src = ctx.upstream_run_id(args.step)
-                result.outputs = [REUSABLE[args.step][1](src, args.target)]
+                reused_path = REUSABLE[args.step][1](src, args.target, div=ctx.div, quarter=ctx.quarter)
+                reused_fp = ctx.step_fp(args.step)
+                result.outputs = [reused_path]
                 result.counters = {"reused_from": src}
-                logger.info(f"{args.step} reused from run {src}", event="ARTIFACT_REUSED", reused_from=src)
+                logger.log_provenance(
+                    source_run_id=src,
+                    path=reused_path,
+                    target=args.target,
+                    fingerprint=reused_fp,
+                    msg=f"{args.step} reused from run {src}",
+                    event="ARTIFACT_REUSED",
+                    reused_from=src,
+                )
         else:
             result = spec.fn(ctx)
         status.status, status.outputs = result.status, result.outputs
@@ -160,26 +181,53 @@ def main(argv=None, storage=None) -> int:
         status.ended_at = _now()
         duration_ms = round((time.time() - t0) * 1000, 1)
         status_path = get_task_status_path(args.run_id, task_id)
-        log_path = get_task_log_path(args.run_id, task_id)
 
         try:
             storage.write_json(status_path, status.to_dict())
         except Exception as write_exc:
-            logger.error(f"could not write status file: {write_exc}", event="STATUS_WRITE_FAILED",
-                         error_category=ErrorCategory.INFRA_TRANSIENT)
+            msg = f"CRITICAL: Failed to write final status file {status_path} (intended status={status.status}): {write_exc}"
+            sys.stderr.write(f"{msg}\n")
+            sys.stderr.flush()
+            logger.error(msg, event="STATUS_WRITE_FAILED",
+                         error_category=ErrorCategory.INFRA_TRANSIENT,
+                         status_path=status_path, intended_status=status.status,
+                         exc=traceback.format_exc())
             exit_code = exit_code or 1
+
+        # If consolidate step failed, ensure the run manifest is closed with a terminal status
+        if args.step == "consolidate" and status.status == "FAILED":
+            try:
+                m_path = get_manifest_path(args.run_id)
+                if not storage.exists(m_path):
+                    matching = [b for b in storage.list_blobs("runs/") if b.replace("\\", "/").endswith(f"/{args.run_id}/run_manifest.json")]
+                    if matching:
+                        m_path = matching[0]
+                if storage.exists(m_path):
+                    m = storage.read_json(m_path)
+                    if m.get("status") == "RUNNING":
+                        m["status"] = "FAILED"
+                        m["end_time"] = status.ended_at
+                        storage.write_json(m_path, m)
+            except Exception as m_exc:
+                logger.error(f"failed to set terminal status on manifest during consolidation failure: {m_exc}",
+                             event="MANIFEST_UPDATE_FAILED")
 
         logger.log_event("TASK_SUMMARY", f"{task_id} -> {status.status}",
                          level="ERROR" if status.status == "FAILED" else "INFO",
                          counters=status.counters, duration_ms=duration_ms,
                          error_category=(status.error or {}).get("category"), status=status.status)
 
-        # Write durable .log file for this task
+        # Write durable .log file for this task: preserve latest canonical AND attempt-specific retry logs
         try:
             log_content = logger.get_task_log_text()
-            storage.write_text(log_path, log_content)
+            canonical_log_path = get_task_log_path(args.run_id, task_id)
+            storage.write_text(canonical_log_path, log_content)
+            if args.attempt:
+                attempt_log_path = get_task_log_path(args.run_id, task_id, attempt=args.attempt)
+                if attempt_log_path != canonical_log_path:
+                    storage.write_text(attempt_log_path, log_content)
         except Exception as log_exc:
-            sys.stderr.write(f"Failed to write task log file {log_path}: {log_exc}\n")
+            sys.stderr.write(f"Failed to write task log file: {log_exc}\n")
 
     return exit_code
 

@@ -64,6 +64,22 @@ def run_init(ctx: StepContext) -> StepResult:
     config, storage = ctx.config, ctx.storage
     set_active_scope(ctx.div, ctx.quarter)
 
+    manifest_path = get_manifest_path(ctx.run_id, ctx.div, ctx.quarter)
+    if storage.exists(manifest_path):
+        if ctx.attempt == 1:
+            raise PipelineError(
+                ErrorCategory.CONFIG,
+                f"run '{ctx.run_id}' is already initialized; to re-run, use a new run_id "
+                f"or invoke individual steps with run_pipeline.py",
+            )
+        existing_manifest = storage.read_json(manifest_path)
+        existing_status = existing_manifest.get("status")
+        if existing_status in ("SUCCEEDED", "PARTIAL", "FAILED"):
+            raise PipelineError(
+                ErrorCategory.CONFIG,
+                f"run '{ctx.run_id}' is already completed with status '{existing_status}'",
+            )
+
     input_uri = config["data"]["input_uri"]
     if storage.exists(input_uri):
         df = storage.read_parquet(input_uri)
@@ -72,11 +88,23 @@ def run_init(ctx: StepContext) -> StepResult:
         logger.warning(f"input '{input_uri}' not found; using synthetic mock data", event="MOCK_INPUT")
     else:
         raise PipelineError(ErrorCategory.UPSTREAM_MISSING, f"input not found: {input_uri}")
+    
+    logger.log_provenance(
+        source_run_id=ctx.run_id,
+        path=input_uri,
+        target=None,
+        fingerprint=None,
+        msg=f"loaded raw input: {input_uri}",
+        rows=len(df),
+        cols=len(df.columns),
+    )
     _validate(df, config)
 
     snapshot_id = "snap_" + data_fp(df)
     snapshot_path = get_snapshot_path(snapshot_id)
     storage.write_parquet(snapshot_path, df, overwrite=False)  # content-addressed: write once
+    logger.info(f"snapshot created: {snapshot_id}", event="SNAPSHOT_CREATED", snapshot_id=snapshot_id,
+                path=snapshot_path, rows=len(df))
 
     config_version = "cfg_" + fp(config)
     config_path = get_master_config_path(ctx.run_id, ctx.div, ctx.quarter)
@@ -114,7 +142,9 @@ def run_init(ctx: StepContext) -> StepResult:
     storage.write_json(index_path, index_entry)
     storage.write_json(f"runs/_index/{ctx.run_id}.json", index_entry)
 
+    outputs = [config_path, snapshot_path, manifest_path]
+    logger.info("init_run outputs written", event="OUTPUT_WRITTEN", outputs=outputs)
     logger.info(f"run initialised: {snapshot_id}, {config_version}, {len(tasks)} planned tasks (div={ctx.div}, quarter={ctx.quarter})",
                 event="RUN_INITIALISED", counters={"tasks": len(tasks)})
-    return StepResult(outputs=[config_path, snapshot_path, manifest_path],
+    return StepResult(outputs=outputs,
                       counters={"rows": len(df), "planned_tasks": len(tasks)})
