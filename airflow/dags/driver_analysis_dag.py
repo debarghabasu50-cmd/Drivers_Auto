@@ -186,10 +186,12 @@ def task_load_aml_workspace(**context) -> dict:
         except Exception as exc:
             logger.warning(f"Could not register environment YAML '{env_yaml}': {exc}", event="AML_ENV_REG_WARNING")
 
+    run_id = _resolve_dag_run_id(context)
     ti = context.get("ti") if context else None
     if ti:
         ti.xcom_push(key="aml_workspace", value=aml_config)
         ti.xcom_push(key="aml_config", value=aml_config)
+        ti.xcom_push(key="run_id", value=run_id)
 
     logger.info(f"AML workspace configuration resolved: workspace={ws}, cluster={cluster}, env={aml_config['azure_ml']['environment_name']}",
                 event="AML_WORKSPACE_RESOLVED")
@@ -270,12 +272,71 @@ def _attempt(context) -> int:
     return getattr(ti, "try_number", 1) if ti else 1
 
 
+def _resolve_dag_run_id(context: Optional[dict] = None) -> str:
+    """Resolve or generate a stable run ID for this DAG run, constant across all tasks and retries."""
+    context = context or {}
+    ti = context.get("ti")
+    dag_run = context.get("dag_run")
+
+    # 1. Check if an explicit run_id was provided via dag_run.conf or DAG params
+    if dag_run and getattr(dag_run, "conf", None) and dag_run.conf.get("run_id"):
+        return dag_run.conf["run_id"]
+    if context.get("params", {}).get("run_id"):
+        return context["params"]["run_id"]
+
+    # 2. Check if already generated and pushed to XCom by an earlier task or previous attempt
+    if ti:
+        for task_id in ("load_aml_workspace", "init_run"):
+            try:
+                pushed = ti.xcom_pull(task_ids=task_id, key="run_id")
+                if pushed:
+                    return pushed
+            except Exception:
+                pass
+
+    # 3. Derive a stable timestamp anchor and deterministic seed from the Airflow DAG run
+    anchor = None
+    if context.get("logical_date"):
+        anchor = context["logical_date"]
+    elif dag_run and getattr(dag_run, "start_date", None):
+        anchor = dag_run.start_date
+    elif dag_run and getattr(dag_run, "execution_date", None):
+        anchor = dag_run.execution_date
+
+    seed = None
+    if dag_run and getattr(dag_run, "run_id", None):
+        seed = dag_run.run_id
+    elif context.get("run_id"):
+        seed = context["run_id"]
+
+    # If anchor is None (e.g. test or manual run with no start_date), parse timestamp from seed if present
+    if anchor is None and seed:
+        import re
+        match = re.search(r"(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})", str(seed))
+        if match:
+            try:
+                anchor = datetime.fromisoformat(match.group(1)).replace(tzinfo=timezone.utc)
+            except Exception:
+                pass
+
+    return new_run_id(now=anchor, seed=seed)
+
+
 def _run_id(context) -> str:
-    return context["ti"].xcom_pull(task_ids="init_run", key="run_id")
+    ti = context.get("ti") if context else None
+    if ti:
+        for task_id in ("load_aml_workspace", "init_run"):
+            try:
+                pushed = ti.xcom_pull(task_ids=task_id, key="run_id")
+                if pushed:
+                    return pushed
+            except Exception:
+                pass
+    return _resolve_dag_run_id(context)
 
 
 def task_init_run(**context):
-    run_id = new_run_id(context.get("logical_date"), seed=context.get("run_id"))  # idempotent across retries
+    run_id = _resolve_dag_run_id(context)
     aml_cfg = _aml_config(context)
     run_step("init_run", run_id, attempt=_attempt(context), aml_config=aml_cfg)
     plan = get_storage_client().read_json(get_manifest_path(run_id))["plan"]
@@ -307,6 +368,7 @@ def task_consolidate(**context):
 
 
 DAG_PARAMS = {
+    "run_id": Param("", type="string", description="Pipeline Run ID (optional override; generated if empty)"),
     "aml_env": Param("dev_env", type="string", description="Environment configuration profile name (e.g. dev_env, prod)"),
     "subscription_id": Param("", type="string", description="Azure Subscription ID (optional override; default from secret/env)"),
     "resource_group": Param("", type="string", description="Azure Resource Group name (optional override; default from secret/env)"),

@@ -79,12 +79,16 @@ def run_consolidation(ctx: StepContext) -> StepResult:
     dml_on = toggles.get("dml", "on") != "off"
     publish = toggles.get("consolidation", "on") != "off"
 
-    manifest = ctx.manifest()
-    tasks = [t for t in manifest["plan"]["tasks"] if t["step"] not in ("init_run", "consolidate")]
-    dml_tasks = [t for t in tasks if t["step"] == "dml"]
-    statuses = _collect_statuses(ctx, tasks)
+    manifest_path = get_manifest_path(ctx.run_id, ctx.div, ctx.quarter)
+    manifest = None
+    statuses = {}
 
     try:
+        manifest = ctx.manifest()
+        tasks = [t for t in manifest["plan"]["tasks"] if t["step"] not in ("init_run", "consolidate")]
+        dml_tasks = [t for t in tasks if t["step"] == "dml"]
+        statuses = _collect_statuses(ctx, tasks)
+
         frames, unreadable = [], []
         for t in dml_tasks if dml_on else []:
             path = get_dml_result_path(ctx.run_id, t["target"], t["fold_id"], ctx.div, ctx.quarter)
@@ -216,23 +220,25 @@ def run_consolidation(ctx: StepContext) -> StepResult:
         # Ensure terminal manifest status is always set on failure paths!
         try:
             end = datetime.now(timezone.utc).isoformat()
-            manifest.update(
-                status="FAILED", end_time=end, steps=statuses,
-                lineage={"error": str(exc), "traceback": traceback.format_exc()}
-            )
-            manifest_path = get_manifest_path(ctx.run_id, ctx.div, ctx.quarter)
-            storage.write_json(manifest_path, manifest)
-            index_path = get_run_index_path(ctx.run_id, ctx.div, ctx.quarter)
-            index_record = {
-                "run_id": ctx.run_id, "div": ctx.div, "quarter": ctx.quarter, "status": "FAILED",
-                "start_time": manifest.get("start_time"), "end_time": end,
-                "snapshot_id": manifest.get("snapshot", {}).get("snapshot_id"),
-                "config_version": manifest.get("config", {}).get("config_version"),
-                "image": manifest.get("image"),
-                "error": str(exc),
-            }
-            storage.write_json(index_path, index_record)
-            storage.write_json(f"runs/_index/{ctx.run_id}.json", index_record)
+            if manifest is None and storage.exists(manifest_path):
+                manifest = storage.read_json(manifest_path)
+            if manifest:
+                manifest.update(
+                    status="FAILED", end_time=end, steps=statuses,
+                    lineage={"error": str(exc), "traceback": traceback.format_exc()}
+                )
+                storage.write_json(manifest_path, manifest)
+                index_path = get_run_index_path(ctx.run_id, ctx.div, ctx.quarter)
+                index_record = {
+                    "run_id": ctx.run_id, "div": ctx.div, "quarter": ctx.quarter, "status": "FAILED",
+                    "start_time": manifest.get("start_time"), "end_time": end,
+                    "snapshot_id": manifest.get("snapshot", {}).get("snapshot_id"),
+                    "config_version": manifest.get("config", {}).get("config_version"),
+                    "image": manifest.get("image"),
+                    "error": str(exc),
+                }
+                storage.write_json(index_path, index_record)
+                storage.write_json(f"runs/_index/{ctx.run_id}.json", index_record)
         except Exception as m_exc:
             logger.error(f"failed to set terminal status on manifest during consolidation error: {m_exc}",
                          event="STATUS_WRITE_FAILED")
