@@ -263,6 +263,44 @@ def test_run_id_is_idempotent_for_a_given_dag_run():
     assert new_run_id()[-6:] != new_run_id()[-6:]
 
 
+def test_dag_run_id_is_stable_across_tasks_and_retries(dag, monkeypatch):
+    from datetime import datetime, timezone
+    monkeypatch.setenv("AML_MODE", "local")
+    pushed = {}
+    ti = SimpleNamespace(
+        try_number=1,
+        pushed=pushed,
+        xcom_push=lambda key, value: pushed.__setitem__(key, value),
+        xcom_pull=lambda task_ids, key: pushed.get(key),
+    )
+    dag_run = SimpleNamespace(run_id="manual__2026-10-14T05:00:00", conf={}, start_date=datetime(2026, 10, 14, 5, 0, 0, tzinfo=timezone.utc))
+    ctx = {"ti": ti, "dag_run": dag_run, "run_id": dag_run.run_id}
+
+    # Step 1: load_aml_workspace resolves run_id once and pushes it
+    dag.task_load_aml_workspace(**ctx)
+    run_id_1 = pushed.get("run_id")
+    assert run_id_1 is not None
+
+    # Step 2: init_run runs on attempt 1 using that exact run_id
+    dag.task_init_run(**ctx)
+    assert pushed["run_id"] == run_id_1
+
+    # Step 3: simulate retry of init_run (try_number=2)
+    ti.try_number = 2
+    dag.task_init_run(**ctx)
+    # The run_id MUST remain identical across retries
+    assert pushed["run_id"] == run_id_1
+
+    # Downstream tasks pull the same run_id
+    assert dag._run_id(ctx) == run_id_1
+
+    # Explicit run_id in dag_run.conf is respected
+    explicit_run = SimpleNamespace(run_id="manual__2", conf={"run_id": "dra_explicit_custom_id"})
+    ti2 = SimpleNamespace(pushed={}, xcom_push=lambda key, value: ti2.pushed.__setitem__(key, value), xcom_pull=lambda task_ids, key: ti2.pushed.get(key))
+    ctx_explicit = {"ti": ti2, "dag_run": explicit_run}
+    assert dag._resolve_dag_run_id(ctx_explicit) == "dra_explicit_custom_id"
+
+
 def test_azure_sdk_errors_are_classified():
     def err(name, status_code=None):
         cls = type(name, (Exception,), {"__module__": "azure.core.exceptions"})

@@ -40,6 +40,16 @@ def render(storage, run_id: str, div: Optional[str] = None, quarter: Optional[st
         if matching:
             manifest_path = matching[0]
         else:
+            init_status_path = get_task_status_path(run_id, "init_run", div, quarter)
+            if not storage.exists(init_status_path):
+                matching_st = [b for b in storage.list_blobs("runs/") if b.replace("\\", "/").endswith(f"/{run_id}/status/init_run.json")]
+                if matching_st:
+                    init_status_path = matching_st[0]
+            if storage.exists(init_status_path):
+                init_st = storage.read_json(init_status_path)
+                if init_st.get("status") == "FAILED":
+                    err_msg = (init_st.get("error") or {}).get("message", "unknown error")
+                    return f"run {run_id}: status=FAILED (init_run failed: {err_msg})"
             return f"run {run_id}: no manifest yet (init_run has not completed)"
     
     manifest = storage.read_json(manifest_path)
@@ -65,13 +75,22 @@ def render(storage, run_id: str, div: Optional[str] = None, quarter: Optional[st
 
 
 def is_run_terminal(storage, run_id: str, div: Optional[str] = None, quarter: Optional[str] = None) -> bool:
-    """Check if the run has reached a terminal status (from manifest or consolidate task status)."""
+    """Check if the run has reached a terminal status (from manifest or task status files)."""
     manifest_path = get_manifest_path(run_id, div, quarter)
     if not storage.exists(manifest_path):
         matching = [b for b in storage.list_blobs("runs/") if b.replace("\\", "/").endswith(f"/{run_id}/run_manifest.json")]
         if matching:
             manifest_path = matching[0]
         else:
+            init_status_path = get_task_status_path(run_id, "init_run", div, quarter)
+            if not storage.exists(init_status_path):
+                matching_st = [b for b in storage.list_blobs("runs/") if b.replace("\\", "/").endswith(f"/{run_id}/status/init_run.json")]
+                if matching_st:
+                    init_status_path = matching_st[0]
+            if storage.exists(init_status_path):
+                init_st = storage.read_json(init_status_path)
+                if init_st.get("status") == "FAILED":
+                    return True
             return False
     try:
         manifest = storage.read_json(manifest_path)

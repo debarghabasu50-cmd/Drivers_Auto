@@ -6,6 +6,7 @@ __pycache__/
 # Local test & mock storage
 .mock_blob/
 artifacts/
+data/
 *.log
 
 # Run artifacts (if created in repo directory outside mock_blob)

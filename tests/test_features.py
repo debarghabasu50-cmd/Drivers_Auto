@@ -448,3 +448,82 @@ def test_reinitialization_guards(tmp_path):
     assert code == 0
 
 
+def test_terminal_manifest_when_init_run_fails(tmp_path):
+    import run_pipeline
+    from pipelines import run_status
+    from shared.path_builder.storage import BlobStorageClient
+
+    storage = BlobStorageClient(base_dir=str(tmp_path))
+    run_id = "dra_fail_init_001"
+
+    # Run init_run with invalid config so it fails before writing a manifest
+    code = run_pipeline.main(["--step", "init_run", "--run-id", run_id, "--config", "nonexistent_config.json"], storage=storage)
+    assert code != 0
+
+    # Ensure run_status detects terminal state so --watch does NOT loop indefinitely
+    assert run_status.is_run_terminal(storage, run_id, "EL", "2026Q3") is True
+    rendered = run_status.render(storage, run_id, "EL", "2026Q3")
+    assert "status=FAILED" in rendered
+    assert "init_run failed" in rendered
+
+
+def test_terminal_manifest_when_consolidation_fails_early(tmp_path, monkeypatch):
+    import run_pipeline
+    from pipelines import run_status
+    from shared.path_builder.paths import get_manifest_path
+    from shared.path_builder.storage import BlobStorageClient
+
+    storage = BlobStorageClient(base_dir=str(tmp_path))
+    run_id = "dra_cons_early_crash"
+
+    # Initialize run
+    assert run_pipeline.main(["--step", "init_run", "--run-id", run_id], storage=storage) == 0
+
+    # Simulate unexpected crash in _collect_statuses
+    def mock_collect(*args, **kwargs):
+        raise RuntimeError("simulated crash during status collection")
+
+    monkeypatch.setattr("pipelines.consolidate._collect_statuses", mock_collect)
+
+    code = run_pipeline.main(["--step", "consolidate", "--run-id", run_id], storage=storage)
+    assert code != 0
+
+    # Terminal status FAILED must be recorded on manifest
+    m = storage.read_json(get_manifest_path(run_id, "EL", "2026Q3"))
+    assert m["status"] == "FAILED"
+    assert m.get("end_time") is not None
+    assert run_status.is_run_terminal(storage, run_id, "EL", "2026Q3") is True
+
+
+def test_terminal_manifest_on_partial_and_total_failure(tmp_path, monkeypatch):
+    import run_pipeline
+    from pipelines import run_status
+    from run_local import run_all
+    from shared.path_builder.paths import get_manifest_path
+    from shared.path_builder.storage import BlobStorageClient
+
+    storage = BlobStorageClient(base_dir=str(tmp_path))
+
+    # Case 1: Partial failure (simulate one fold failure)
+    real_fit = run_pipeline.STEPS["dml"].fn
+    def flaky_fit(ctx):
+        if ctx.fold_id == "f2":
+            raise RuntimeError("flaky fold f2 failure")
+        return real_fit(ctx)
+
+    monkeypatch.setattr(run_pipeline.STEPS["dml"], "fn", flaky_fit)
+    run_partial = run_all(storage)
+    m_partial = storage.read_json(get_manifest_path(run_partial, "EL", "2026Q3"))
+    assert m_partial["status"] == "PARTIAL"
+    assert run_status.is_run_terminal(storage, run_partial, "EL", "2026Q3") is True
+
+    # Case 2: Total failure (feature selection fails -> all subsequent steps fail)
+    def fail_fs(ctx):
+        raise RuntimeError("fs total failure")
+    monkeypatch.setattr(run_pipeline.STEPS["feature_selection"], "fn", fail_fs)
+    run_failed = run_all(storage)
+    m_failed = storage.read_json(get_manifest_path(run_failed, "EL", "2026Q3"))
+    assert m_failed["status"] == "FAILED"
+    assert run_status.is_run_terminal(storage, run_failed, "EL", "2026Q3") is True
+
+
