@@ -1,27 +1,154 @@
 {
-  "cache_version": 1,
-  "seed": 42,
-  "inner_cv_splits": 5,
-  "outcome_learner": {
-    "model": "RandomForestRegressor",
-    "params": {
-      "n_estimators": 100,
-      "max_depth": 6,
-      "n_jobs": 1,
-      "random_state": 42
-    }
+  "file": "sample_data.xlsx",
+  "outcome_col": "orders_received_net",
+  "data_freq": 12,
+  "division_name": "ELDS_44",
+
+"stage1_cache": {
+  "enabled": true,
+  "force_rebuild": false,
+  "subdir": "_stage1_cache",
+  "cache_version": 1
+},
+
+"drivers": {
+    "Data center": "Data center | Hyperscaler | Quarterly | lag_9",
+    "us customer": "United States | Utilities Customer Capex | Quarterly | lag_6",
+    "copper": "LME Copper Cash-Settlement ($/tonne) | lag_9",
+    "china_cons": "China (mainland) | (F) Construction | CISQ Industry Output | lag_9",
+    "china renewable": "China (mainland) | Renewable Energy | Monthly | lag_6",
+    "us renewable": "United States | Renewable Energy | Monthly | lag_6",
+    "eu_power": "Europe | Power production from Oil & Gas | Monthly | lag_3"
   },
-  "treatment_learner": {
-    "model": "RandomForestRegressor",
-    "params": {
-      "n_estimators": 100,
-      "max_depth": 6,
-      "n_jobs": 1,
-      "random_state": 42
-    }
+
+  "combination_size": 5,
+  
+  "time_confounders": ["trend"],
+  "piecewise_time_confounders": ["trend", "regime_dummy"],
+  "sign_priors": {
+    "Data center": 1,
+    "us renewable": 1,
+    "china renewable": 1,
+    "us customer": 1,
+    "us energy": 1,
+    "copper": 1,
+    "europe mining": 1,
+    "eu_power": 1,
+    "us_fixed": 1,
+    "china_cons": 1,
+    "composite_power": 1,
+    "composite_cons": 1,
+    "composite renewable": 1,
+    "composit o&g_capex": 1,
+    "china_chemical": 1
   },
-  "stage2": {
-    "fit_intercept": true,
-    "robust_se": "HC1"
+  "piecewise_drivers": {"Data center": 0.3},
+  "confounder_selection_method": "correlation",
+  "confounder_selection_end_date": "2025-04-01",
+  "train_end": "2026-07-01",
+  "train_end_dates": [
+    "2025-01-01",
+    "2025-04-01"
+  ],
+  "regime_date": "2023-01-01",
+  "alpha_stage1t": 5.0,
+  "gbm_stage1t": {
+    "n_estimators": 30,
+    "max_depth": 2,
+    "learning_rate": 0.1,
+    "random_state": 42
+  },
+  "alpha_stage2": 1,
+  "alpha_stage1y": 2,
+  "val_rows": 12,
+  "output_dir": "dml_outputs_block_bootstrap_cache_exp",
+  "combined_validation_file": "DML_cross_fold_validation_ELDS_block_bootstrap.xlsx",
+  "fold_output_subdir": "folds",
+  "generated_config_subdir": "fold_configs",
+  "confounder_count": {
+    "Data center": 3,
+    "us renewable": 3,
+    "eu_power": 3,
+    "us_fixed": 3,
+    "composite_power": 3,
+    "composite renewable": 3,
+    "chemical_power": 3,
+    "copper": 3,
+    "china_cons": 3,
+    "us customer": 3,
+    "china renewable": 3
+  },
+
+  "partial_correlation": {
+    "enabled": true,
+    "relative_threshold": 0.5,
+    "stop_when_below_threshold": true
+},
+
+  "y_confounder_selection": {
+    "enabled": true,
+    "max_confounders": 3,
+    "relative_threshold": 0.5,
+    "stop_when_below_threshold": true
+  },
+    
+  "stage1_thresholds": {
+    "min_var_ratio": 0.15,
+    "max_adf_pvalue": 0.1
+  },
+  "bootstrap": {
+    "n_resamples": 200,
+    "random_seed": 42,
+    "sample_fraction": 0.60
+  },
+  "bootstrap_diagnostics": {
+    "sign_consistency_threshold": 0.75,
+    "relative_se_pass_threshold": 0.3,
+    "relative_se_severe_threshold": 0.5,
+    "standard_deviation_ddof": 1,
+    "near_zero_elasticity_tolerance": 0.000001
+  },
+  "cross_fold_validation": {
+    "enabled": true,
+    "cv_pass_threshold": 0.25,
+    "minimum_valid_folds": 2,
+    "overall_pass_fraction": 0.9,
+    "standard_deviation_ddof": 1,
+    "near_zero_mean_tolerance": 0.000001
+  },
+  "rolling_windows": [30, 33, 36, 39],
+  "decision_thresholds": {
+    "corr_flag_high": 0.7,
+    "corr_flag_strong": 0.85,
+    "vif_warn": 5.0,
+    "vif_action": 10.0,
+    "elast_strong": 0.5,
+    "elast_weak": 0.1
+  },
+  "stage2_alpha_search": {
+    "min_power": -2,
+    "max_power": 3,
+    "num_values": 100
+  },
+  "fallback_thresholds": {"max_abs_elasticity": 1.5},
+  "data_quality_thresholds": {
+    "min_y_var_ratio": 0.3,
+    "max_y_mean_shift": 0.5
+  },
+  "rolling_stability_thresholds": {
+    "ok_swing": 0.15,
+    "warn_swing": 0.35
+  },
+  "bootstrap_ci": {
+    "lower_percentile": 10,
+    "upper_percentile": 90
+  },
+  "vif_config": {
+    "ridge_alpha": 0.0001,
+    "max_r2_cap": 0.9999
+  },
+  "piecewise_decision_thresholds": {
+    "near_zero_both": 0.01,
+    "high_slope_zero": 0.000001
   }
 }
