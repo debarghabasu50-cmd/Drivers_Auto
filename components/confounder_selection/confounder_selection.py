@@ -330,6 +330,8 @@ def select_confounders(df, train_df, config, drivers, time_confs, yoy_log_diff):
                 elif y_stop:
                     break
 
+        y_confounders = list(time_confs) + selected_y_external
+
     logger.info(
         f"Final Y confounders: {y_confounders}",
         event="Y_CONFOUNDERS_RESOLVED",
@@ -342,6 +344,7 @@ def select_confounders(df, train_df, config, drivers, time_confs, yoy_log_diff):
 # =============================================================================
 # PIPELINE INTEGRATION
 # =============================================================================
+
 
 def run_confounder_selection(ctx: StepContext) -> StepResult:
     """Pipeline entry point for confounder selection.
@@ -362,21 +365,28 @@ def run_confounder_selection(ctx: StepContext) -> StepResult:
     # Resolve target column
     target_col = next((t["column"] for t in ctx.config.get("targets", []) if t["target_id"] == ctx.target), ctx.target)
 
-    # Resolve drivers: prioritize resolved_kpis from upstream feature_selection
+    # Resolve drivers: support curated driver superset from dml_config
     dml_cfg = ctx.config.get("dml", {})
-    if treatments:
-        drivers = {t: t for t in treatments if t in df.columns}
-    else:
-        configured_drivers = dml_cfg.get("drivers", {})
-        if configured_drivers:
-            drivers = {}
-            for label, col in configured_drivers.items():
-                if col in df.columns:
-                    drivers[label] = col
-                elif label in df.columns:
-                    drivers[label] = label
+    configured_drivers = dml_cfg.get("drivers", {})
+
+    if treatments and configured_drivers:
+        # Check if configured_drivers filters or curates upstream treatments
+        matching = {
+            label: col for label, col in configured_drivers.items()
+            if (label in treatments or col in treatments) and (col in df.columns or label in df.columns)
+        }
+        if matching:
+            drivers = {label: (col if col in df.columns else label) for label, col in matching.items()}
+        elif ctx.config.get("steps", {}).get("feature_selection", "on") == "off" and not treatments:
+            drivers = {label: (col if col in df.columns else label) for label, col in configured_drivers.items() if (col in df.columns or label in df.columns)}
         else:
-            drivers = {}
+            drivers = {t: t for t in treatments if t in df.columns}
+    elif treatments:
+        drivers = {t: t for t in treatments if t in df.columns}
+    elif configured_drivers:
+        drivers = {label: (col if col in df.columns else label) for label, col in configured_drivers.items() if (col in df.columns or label in df.columns)}
+    else:
+        drivers = {}
 
     if not drivers:
         drivers = {c: c for c in df.columns if c not in (target_col, date_col, "trend", "regime_dummy") and pd.api.types.is_numeric_dtype(df[c])}
