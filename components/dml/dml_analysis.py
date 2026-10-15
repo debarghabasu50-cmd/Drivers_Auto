@@ -2453,8 +2453,12 @@ def _plan(ctx, confounders, combos, fold, col_hash, dml_cfg):
     """Stage-1 units (deduplicated by key) and the Stage-2 row plan.
     For every combination C and driver t in C: controls = (C minus t) + confounders(t);
     one outcome unit (Y ~ controls) and one treatment unit (t ~ controls)."""
-    train_window = f"{fold['train_start']}_{fold['train_end']}"
-    test_window = f"{fold['test_start']}_{fold['test_end']}"
+    train_end = fold["train_end"]
+    train_start = fold.get("train_start", "2021-01-01")
+    train_window = f"{train_start}_{train_end}"
+    test_start = fold.get("test_start")
+    test_end = fold.get("test_end")
+    test_window = f"{test_start}_{test_end}" if (test_start and test_end) else f"after_{train_end}"
     column_of = {t["target_id"]: t["column"] for t in ctx.config.get("targets", [])}
     cache_version = dml_cfg.get("cache_version", dml_cfg.get("stage1_cache", {}).get("cache_version", 1))
     units, rows = {}, []
@@ -2486,7 +2490,11 @@ def run_dml_fold(ctx: StepContext) -> StepResult:
     """
     dml_cfg, fold, storage = ctx.config.get("dml", {}), ctx.fold_spec(), ctx.storage
     date_col = ctx.config.get("data", {}).get("date_col", "date")
-    train_window = f"{fold['train_start']}_{fold['train_end']}"
+    train_end = fold["train_end"]
+    train_start = fold.get("train_start", "2021-01-01")
+    train_window = f"{train_start}_{train_end}"
+    test_start = fold.get("test_start")
+    test_end = fold.get("test_end")
     n_jobs = int(ctx.config.get("execution", {}).get("n_jobs", 1))
 
     set_active_scope(ctx.div, ctx.quarter)
@@ -2513,8 +2521,18 @@ def run_dml_fold(ctx: StepContext) -> StepResult:
         if c not in df.columns:
             df[c] = 0.0
 
-    train = df[(df[date_col] >= fold["train_start"]) & (df[date_col] <= fold["train_end"])].copy()
-    test = df[(df[date_col] >= fold["test_start"]) & (df[date_col] <= fold["test_end"])].copy()
+    if "train_start" in fold:
+        train = df[(df[date_col] >= fold["train_start"]) & (df[date_col] <= train_end)].copy()
+    else:
+        train = df[df[date_col] <= train_end].copy()
+
+    if "test_start" in fold and "test_end" in fold:
+        test = df[(df[date_col] >= fold["test_start"]) & (df[date_col] <= fold["test_end"])].copy()
+    elif "test_start" in fold:
+        test = df[df[date_col] >= fold["test_start"]].copy()
+    else:
+        test = df[df[date_col] > train_end].copy()
+
     source_hash = (manifest.get("snapshot") or {}).get("snapshot_id", "default_hash")
 
     hashes: Dict[str, str] = {}
@@ -2565,8 +2583,8 @@ def run_dml_fold(ctx: StepContext) -> StepResult:
             metadata = CacheMetadataContract(
                 fingerprint=key, cache_version=cache_ver, role=unit["role"], target=ctx.target,
                 driver_col=unit["variable"], controls=unit["controls"],
-                train_start=fold["train_start"], train_end=fold["train_end"],
-                test_start=fold["test_start"], test_end=fold["test_end"], fold_id=ctx.fold_id,
+                train_start=str(train_start), train_end=str(train_end),
+                test_start=str(test_start or ""), test_end=str(test_end or ""), fold_id=ctx.fold_id,
                 source_file=(manifest.get("snapshot") or {}).get("uri", ""), source_data_hash=source_hash,
                 learner_spec=unit["learner"], inner_cv_splits=dml_cfg.get("inner_cv_splits", 3), seed=dml_cfg.get("seed", 42),
                 created_at=datetime.now(timezone.utc).isoformat(), producer_run_id=ctx.run_id).to_dict()

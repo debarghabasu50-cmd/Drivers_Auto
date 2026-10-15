@@ -41,15 +41,6 @@
     ],
     "exclude": []
   },
-  "confounders": {
-    "selection_end_date": "2025-04-01",
-    "candidate_pool": [
-      "macro_inflation",
-      "interest_rate",
-      "industry_index"
-    ],
-    "window": "common_train"
-  },
   "combinations": {
     "drivers_per_combo": 3,
     "max_combinations": 100,
@@ -58,17 +49,11 @@
   "folds": [
     {
       "fold_id": "f1",
-      "train_start": "2021-01-01",
-      "train_end": "2024-12-31",
-      "test_start": "2025-01-01",
-      "test_end": "2025-03-31"
+      "train_end": "2024-12-31"
     },
     {
       "fold_id": "f2",
-      "train_start": "2021-01-01",
-      "train_end": "2025-03-31",
-      "test_start": "2025-04-01",
-      "test_end": "2025-06-30"
+      "train_end": "2025-03-31"
     }
   ],
   "cache": {

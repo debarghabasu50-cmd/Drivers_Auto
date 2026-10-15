@@ -54,7 +54,8 @@ def _synthetic_input(config: Dict[str, Any]) -> pd.DataFrame:
     dml_drivers = list(config.get("dml", {}).get("drivers", {}).values())
     global_drivers = list(config.get("drivers", {}).values()) if isinstance(config.get("drivers"), dict) else []
     conf_pool = config.get("confounders", {}).get("candidate_pool", []) if isinstance(config.get("confounders"), dict) else []
-    cols = sorted(list(set(target_cols + kpi_cols + dml_drivers + global_drivers + conf_pool)))
+    mock_controls = ["macro_inflation", "interest_rate", "industry_index"] if not conf_pool else []
+    cols = sorted(list(set(target_cols + kpi_cols + dml_drivers + global_drivers + conf_pool + mock_controls)))
     if not cols:
         cols = ["orders_received_net", "price_index"]
     dates = pd.period_range("2021-01", "2025-06", freq="M").to_timestamp(how="end").normalize()
