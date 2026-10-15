@@ -5,7 +5,6 @@
     "subdir": "_stage1_cache",
     "cache_version": 1
   },
-
   "drivers": {
     "Data center": "Data center | Hyperscaler | Quarterly | lag_9",
     "us customer": "United States | Utilities Customer Capex | Quarterly | lag_6",
@@ -15,9 +14,13 @@
     "us renewable": "United States | Renewable Energy | Monthly | lag_6",
     "eu_power": "Europe | Power production from Oil & Gas | Monthly | lag_3"
   },
-
-  "time_confounders": ["trend"],
-  "piecewise_time_confounders": ["trend", "regime_dummy"],
+  "time_confounders": [
+    "trend"
+  ],
+  "piecewise_time_confounders": [
+    "trend",
+    "regime_dummy"
+  ],
   "sign_priors": {
     "Data center": 1,
     "us renewable": 1,
@@ -35,7 +38,9 @@
     "composit o&g_capex": 1,
     "china_chemical": 1
   },
-  "piecewise_drivers": {"Data center": 0.3},
+  "piecewise_drivers": {
+    "Data center": 0.3
+  },
   "confounder_selection_method": "correlation",
   "regime_date": "2023-01-01",
   "alpha_stage1t": 5.0,
@@ -61,20 +66,17 @@
     "us customer": 3,
     "china renewable": 3
   },
-
   "partial_correlation": {
     "enabled": true,
     "relative_threshold": 0.5,
     "stop_when_below_threshold": true
   },
-
   "y_confounder_selection": {
     "enabled": true,
     "max_confounders": 3,
     "relative_threshold": 0.5,
     "stop_when_below_threshold": true
   },
-
   "stage1_thresholds": {
     "min_var_ratio": 0.15,
     "max_adf_pvalue": 0.1
@@ -99,7 +101,12 @@
     "standard_deviation_ddof": 1,
     "near_zero_mean_tolerance": 0.000001
   },
-  "rolling_windows": [30, 33, 36, 39],
+  "rolling_windows": [
+    30,
+    33,
+    36,
+    39
+  ],
   "decision_thresholds": {
     "corr_flag_high": 0.7,
     "corr_flag_strong": 0.85,
@@ -113,7 +120,9 @@
     "max_power": 3,
     "num_values": 100
   },
-  "fallback_thresholds": {"max_abs_elasticity": 1.5},
+  "fallback_thresholds": {
+    "max_abs_elasticity": 1.5
+  },
   "data_quality_thresholds": {
     "min_y_var_ratio": 0.3,
     "max_y_mean_shift": 0.5
