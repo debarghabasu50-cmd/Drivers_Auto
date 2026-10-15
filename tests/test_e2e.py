@@ -6,6 +6,8 @@ import copy
 import json
 
 import pytest
+import numpy as np
+import pandas as pd
 
 import run_pipeline
 from components.dml import dml_analysis
@@ -203,6 +205,14 @@ def test_heavy_fold_enumerates_all_combinations_and_shares_units(storage, monkey
         c["kpis"]["extra"] = [f"k{i}" for i in range(8)]
         c["combinations"].update(drivers_per_combo=4, max_combinations=40)
     use_config(monkeypatch, edit)
+    cfg = load_repo_config()
+    edit(cfg)
+    dates = pd.period_range("2021-01", "2025-06", freq="M").to_timestamp(how="end").normalize()
+    cols = ["orders_value"] + [f"k{i}" for i in range(8)] + ["macro_inflation"]
+    rng = np.random.RandomState(0)
+    test_df = pd.DataFrame(rng.normal(size=(len(dates), len(cols))), columns=cols)
+    test_df.insert(0, "date", dates)
+    storage.write_parquet(cfg["data"]["input_uri"], test_df)
     run_id = run_all(storage)
     m = manifest(storage, run_id)
     assert m["status"] == "SUCCEEDED" and m["completeness"]["expected_rows"] == 2 * 40 * 4

@@ -47,24 +47,6 @@ def load_repo_config(master_path: str = None) -> Dict[str, Any]:
     return config
 
 
-def _synthetic_input(config: Dict[str, Any]) -> pd.DataFrame:
-    """Deterministic stand-in for the upstream KPI table (mock mode only)."""
-    target_cols = [t["column"] for t in config.get("targets", [])]
-    kpi_cols = config.get("kpis", {}).get("extra", [])
-    dml_drivers = list(config.get("dml", {}).get("drivers", {}).values())
-    global_drivers = list(config.get("drivers", {}).values()) if isinstance(config.get("drivers"), dict) else []
-    conf_pool = config.get("confounders", {}).get("candidate_pool", []) if isinstance(config.get("confounders"), dict) else []
-    mock_controls = ["macro_inflation", "interest_rate", "industry_index"] if not conf_pool else []
-    cols = sorted(list(set(target_cols + kpi_cols + dml_drivers + global_drivers + conf_pool + mock_controls)))
-    if not cols:
-        cols = ["orders_received_net", "price_index"]
-    dates = pd.period_range("2021-01", "2025-06", freq="M").to_timestamp(how="end").normalize()
-    rng = np.random.RandomState(0)
-    df = pd.DataFrame(rng.normal(size=(len(dates), len(cols))), columns=cols)
-    df.insert(0, config["data"]["date_col"], dates)
-    return df
-
-
 def _validate(df: pd.DataFrame, config: Dict[str, Any]) -> None:
     date_col = config["data"]["date_col"]
     needed = [date_col] + [t["column"] for t in config["targets"]] + config["kpis"]["extra"]
@@ -99,8 +81,19 @@ def run_init(ctx: StepContext) -> StepResult:
     if storage.exists(input_uri):
         df = storage.read_parquet(input_uri)
     elif storage.is_mock:
-        df = _synthetic_input(config)
-        logger.warning(f"input '{input_uri}' not found; using synthetic mock data", event="MOCK_INPUT")
+        repo_root = Path(__file__).resolve().parents[1]
+        local_candidates = [
+            Path(input_uri),
+            repo_root / input_uri,
+            repo_root / "data" / Path(input_uri).name,
+            Path("data") / Path(input_uri).name,
+        ]
+        local_path = next((p for p in local_candidates if p.is_file()), None)
+        if local_path is not None:
+            df = pd.read_parquet(local_path)
+            storage.write_parquet(input_uri, df, overwrite=False)
+        else:
+            raise PipelineError(ErrorCategory.UPSTREAM_MISSING, f"input not found: {input_uri}")
     else:
         raise PipelineError(ErrorCategory.UPSTREAM_MISSING, f"input not found: {input_uri}")
     

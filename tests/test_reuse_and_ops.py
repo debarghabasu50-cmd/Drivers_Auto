@@ -12,7 +12,7 @@ import pytest
 
 import run_pipeline
 from run_local import run_all
-from pipelines.init_run import _synthetic_input, load_repo_config
+from pipelines.init_run import load_repo_config
 from shared import aml
 from shared.path_builder.paths import (
     get_published_result_path,
@@ -161,7 +161,8 @@ def test_live_backend_matches_mock_semantics():
 def test_full_pipeline_runs_on_the_live_backend_code_path():
     live = BlobStorageClient(connection_string="UseDevelopmentStorage=true")
     live._live = FakeContainer()
-    live.write_parquet(load_repo_config()["data"]["input_uri"], _synthetic_input(load_repo_config()))  # live needs real input
+    real_input = pd.read_parquet(Path(__file__).resolve().parents[1] / "data" / "kpi_data.parquet")
+    live.write_parquet(load_repo_config()["data"]["input_uri"], real_input)  # live needs real input
     run_id = run_all(live)
     assert manifest(live, run_id)["status"] == "SUCCEEDED"
     # without input the live backend refuses to invent data
