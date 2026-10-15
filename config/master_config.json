@@ -2,9 +2,7 @@
   "div": "EL",
   "quarter": "2026Q3",
   "pipeline": {
-    "name": "driver_analysis",
-    "div": "EL",
-    "quarter": "2026Q3"
+    "name": "driver_analysis"
   },
   "data": {
     "input_uri": "input/EL/2026Q3/kpi_data.parquet",
@@ -44,6 +42,7 @@
     "exclude": []
   },
   "confounders": {
+    "selection_end_date": "2025-04-01",
     "candidate_pool": [
       "macro_inflation",
       "interest_rate",

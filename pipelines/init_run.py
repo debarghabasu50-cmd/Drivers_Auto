@@ -34,15 +34,29 @@ def load_repo_config(master_path: str = None) -> Dict[str, Any]:
     for key, name in (("feature_selection", "feature_selection_config.json"), ("dml", "dml_config.json")):
         config[key] = json.loads((CONFIG_DIR / name).read_text(encoding="utf-8"))
     
-    div = config.get("pipeline", {}).get("div", "EL")
-    quarter = config.get("pipeline", {}).get("quarter", "2026Q3")
+    div = config.get("div", config.get("pipeline", {}).get("div", "EL"))
+    quarter = config.get("quarter", config.get("pipeline", {}).get("quarter", "2026Q3"))
     set_active_scope(div, quarter)
+
+    # Derive folds if not explicitly provided in master_config
+    if not config.get("folds"):
+        cutoffs = config.get("train_end_dates") or config.get("dml", {}).get("train_end_dates", [])
+        if cutoffs:
+            config["folds"] = [{"fold_id": f"f{i+1}", "train_end": d} for i, d in enumerate(cutoffs)]
+
     return config
 
 
 def _synthetic_input(config: Dict[str, Any]) -> pd.DataFrame:
     """Deterministic stand-in for the upstream KPI table (mock mode only)."""
-    cols = [t["column"] for t in config["targets"]] + config["kpis"]["extra"] + config["confounders"]["candidate_pool"]
+    target_cols = [t["column"] for t in config.get("targets", [])]
+    kpi_cols = config.get("kpis", {}).get("extra", [])
+    dml_drivers = list(config.get("dml", {}).get("drivers", {}).values())
+    global_drivers = list(config.get("drivers", {}).values()) if isinstance(config.get("drivers"), dict) else []
+    conf_pool = config.get("confounders", {}).get("candidate_pool", []) if isinstance(config.get("confounders"), dict) else []
+    cols = sorted(list(set(target_cols + kpi_cols + dml_drivers + global_drivers + conf_pool)))
+    if not cols:
+        cols = ["orders_received_net", "price_index"]
     dates = pd.period_range("2021-01", "2025-06", freq="M").to_timestamp(how="end").normalize()
     rng = np.random.RandomState(0)
     df = pd.DataFrame(rng.normal(size=(len(dates), len(cols))), columns=cols)

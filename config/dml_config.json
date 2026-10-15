@@ -1,17 +1,12 @@
 {
-  "file": "sample_data.xlsx",
-  "outcome_col": "orders_received_net",
-  "data_freq": 12,
-  "division_name": "ELDS_44",
+  "stage1_cache": {
+    "enabled": true,
+    "force_rebuild": false,
+    "subdir": "_stage1_cache",
+    "cache_version": 1
+  },
 
-"stage1_cache": {
-  "enabled": true,
-  "force_rebuild": false,
-  "subdir": "_stage1_cache",
-  "cache_version": 1
-},
-
-"drivers": {
+  "drivers": {
     "Data center": "Data center | Hyperscaler | Quarterly | lag_9",
     "us customer": "United States | Utilities Customer Capex | Quarterly | lag_6",
     "copper": "LME Copper Cash-Settlement ($/tonne) | lag_9",
@@ -21,8 +16,6 @@
     "eu_power": "Europe | Power production from Oil & Gas | Monthly | lag_3"
   },
 
-  "combination_size": 5,
-  
   "time_confounders": ["trend"],
   "piecewise_time_confounders": ["trend", "regime_dummy"],
   "sign_priors": {
@@ -44,12 +37,6 @@
   },
   "piecewise_drivers": {"Data center": 0.3},
   "confounder_selection_method": "correlation",
-  "confounder_selection_end_date": "2025-04-01",
-  "train_end": "2026-07-01",
-  "train_end_dates": [
-    "2025-01-01",
-    "2025-04-01"
-  ],
   "regime_date": "2023-01-01",
   "alpha_stage1t": 5.0,
   "gbm_stage1t": {
@@ -61,10 +48,6 @@
   "alpha_stage2": 1,
   "alpha_stage1y": 2,
   "val_rows": 12,
-  "output_dir": "dml_outputs_block_bootstrap_cache_exp",
-  "combined_validation_file": "DML_cross_fold_validation_ELDS_block_bootstrap.xlsx",
-  "fold_output_subdir": "folds",
-  "generated_config_subdir": "fold_configs",
   "confounder_count": {
     "Data center": 3,
     "us renewable": 3,
@@ -83,7 +66,7 @@
     "enabled": true,
     "relative_threshold": 0.5,
     "stop_when_below_threshold": true
-},
+  },
 
   "y_confounder_selection": {
     "enabled": true,
@@ -91,7 +74,7 @@
     "relative_threshold": 0.5,
     "stop_when_below_threshold": true
   },
-    
+
   "stage1_thresholds": {
     "min_var_ratio": 0.15,
     "max_adf_pvalue": 0.1

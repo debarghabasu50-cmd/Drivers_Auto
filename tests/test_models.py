@@ -5,7 +5,7 @@ import pytest
 import shutil
 from pathlib import Path
 from shared.path_builder.storage import BlobStorageClient
-from components.residual_caching.residual_caching import (
+from components.residual_caching.cache import (
     compute_unit_key,
     check_cache_hits,
     save_cached_unit,

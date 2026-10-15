@@ -13,12 +13,6 @@ import warnings
 from itertools import combinations
 from pathlib import Path
 
-import matplotlib
-
-matplotlib.use("Agg")
-
-import matplotlib.dates as mdates
-import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 from sklearn.ensemble import GradientBoostingRegressor
@@ -26,13 +20,43 @@ from sklearn.linear_model import Ridge
 from sklearn.metrics import r2_score
 from statsmodels.tsa.stattools import adfuller
 
-from confounder_selection import select_confounders
-from stage1_cache import (
+import math
+import os
+from datetime import datetime, timezone
+from typing import Any, Dict, List, Optional, Set, Tuple
+
+from components.confounder_selection.confounder_selection import select_confounders
+from components.residual_caching.cache import (
     calculate_file_hash,
+    check_cache_hits,
+    compute_unit_key,
+    load_cached_unit,
     load_driver_stage1_cache,
     make_driver_cache_fingerprint,
+    save_cached_unit,
     save_driver_stage1_cache,
 )
+
+from shared.combinations import combination_id, enumerate_combinations
+from shared.context import StepContext, StepResult
+from shared.logging import logger
+from shared.path_builder.paths import (
+    get_confounder_selection_path,
+    get_dml_diagnostics_path,
+    get_dml_result_path,
+    get_stage1_refs_path,
+    set_active_scope,
+)
+from shared.schema.contracts import (
+    CacheMetadataContract,
+    ErrorCategory,
+    PipelineError,
+    data_fp,
+    fp,
+)
+
+# Errors a single unit can raise without failing the whole fold (Level 1 isolation).
+UNIT_LEVEL_ERRORS = {ErrorCategory.MODEL_CONVERGENCE, ErrorCategory.NUMERIC}
 
 warnings.filterwarnings("ignore")
 
@@ -42,12 +66,58 @@ warnings.filterwarnings("ignore")
 # =============================================================================
 
 
+FREQ_MAP = {"M": 12, "Q": 4, "W": 52, "D": 365}
+
+
 def load_config(config_path: str | Path) -> dict:
-    """Load and validate configuration."""
+    """Load DML configuration and merge global parameters from master_config.json if available."""
     path = Path(config_path)
 
     with path.open("r", encoding="utf-8") as file:
-        config = json.load(file)
+        dml_config = json.load(file)
+
+    # Check for master_config.json in the same directory, or repo root config dir
+    master_path = path.parent / "master_config.json"
+    if not master_path.exists():
+        repo_root = Path(__file__).resolve().parents[2]
+        alt_master = repo_root / "config" / "master_config.json"
+        if alt_master.exists():
+            master_path = alt_master
+
+    master = {}
+    if master_path.exists():
+        with master_path.open("r", encoding="utf-8") as file:
+            master = json.load(file)
+
+    config = {**master, **dml_config}
+
+    # Map master global params to the flat keys the standalone functions expect
+    if "file" not in config:
+        config["file"] = master.get("data", {}).get("input_uri", "")
+    if "outcome_col" not in config:
+        targets = master.get("targets", [])
+        config["outcome_col"] = targets[0]["column"] if targets else ""
+    if "data_freq" not in config:
+        freq_str = master.get("data", {}).get("freq", "M")
+        config["data_freq"] = FREQ_MAP.get(freq_str, 12)
+    if "division_name" not in config:
+        config["division_name"] = master.get("div", "")
+    if "combination_size" not in config:
+        config["combination_size"] = master.get("combinations", {}).get(
+            "drivers_per_combo", 3
+        )
+    if "train_end_dates" not in config and "train_end" not in config:
+        folds = master.get("folds", [])
+        if folds:
+            config["train_end_dates"] = [f["train_end"] for f in folds]
+            config["train_end"] = folds[-1]["train_end"]
+    if "confounder_selection_end_date" not in config:
+        config["confounder_selection_end_date"] = master.get(
+            "confounders", {}
+        ).get("selection_end_date", "")
+
+    config.setdefault("output_dir", "dml_outputs")
+    config.setdefault("alpha_stage1t", 5.0)
 
     assert config["alpha_stage1y"] >= 0.1, "alpha_stage1y too low (min 0.1)"
     assert config["alpha_stage1y"] <= 500, "alpha_stage1y too high (max 500)"
@@ -57,9 +127,6 @@ def load_config(config_path: str | Path) -> dict:
         assert (
             0.001 <= config["alpha_stage2"] <= 1000
         ), "alpha_stage2 out of range [0.001, 1000]"
-
-    config.setdefault("output_dir", "dml_outputs")
-    config.setdefault("alpha_stage1t", 5.0)
 
     return config
 
@@ -166,24 +233,26 @@ def prepare_data(config: dict):
 
 
 def print_dataset_summary(config, train_df, test_df, output_dir):
-    """Print dataset information."""
-    print(f"Division    : {config['division_name']}")
-    print(f"All Drivers : {list(config['drivers'].keys())}")
-
-    print(
-        f"Training set: {len(train_df)} rows  "
-        f"({train_df['date'].min().date()} to {train_df['date'].max().date()})"
+    """Log dataset information."""
+    train_range = (
+        f"{train_df['date'].min().date()} to {train_df['date'].max().date()}"
+        if not train_df.empty
+        else "empty"
     )
-
-    if test_df.empty:
-        print("Test set    : skipped - entire available period is used for training")
-    else:
-        print(
-            f"Test set    : {len(test_df)} rows  "
-            f"({test_df['date'].min().date()} to {test_df['date'].max().date()})"
-        )
-
-    print(f"Outputs will be saved to: {output_dir.resolve()}")
+    test_range = (
+        f"{test_df['date'].min().date()} to {test_df['date'].max().date()}"
+        if not test_df.empty
+        else "skipped - entire available period used for training"
+    )
+    logger.info(
+        f"DML Dataset | Division: {config.get('division_name')} | Drivers: {list(config.get('drivers', {}).keys())} | "
+        f"Train: {len(train_df)} rows ({train_range}) | Test: {len(test_df)} rows ({test_range}) | "
+        f"Output dir: {Path(output_dir).resolve()}",
+        event="DML_DATASET_SUMMARY",
+        division=config.get("division_name"),
+        train_rows=len(train_df),
+        test_rows=len(test_df),
+    )
 
 
 # =============================================================================
@@ -407,16 +476,20 @@ def print_stage1_driver_gate(
             else "WARN"
         )
 
-        print(
-            f"[{gate_low}] {driver_label + ' low':<15} "
-            f"VarRatio={result['var_ratio_low']:.3f} "
-            f"ADF-p={result['adf_pvalue_low']:.3f}"
+        logger.info(
+            f"[{gate_low}] {driver_label + ' low':<15} VarRatio={result['var_ratio_low']:.3f} ADF-p={result['adf_pvalue_low']:.3f}",
+            event="STAGE1_DRIVER_GATE",
+            driver=f"{driver_label}_low",
+            gate=gate_low,
+            var_ratio=round(float(result["var_ratio_low"]), 3),
         )
 
-        print(
-            f"[{gate_high}] {driver_label + ' high':<15} "
-            f"VarRatio={result['var_ratio_high']:.3f} "
-            f"ADF-p={result['adf_pvalue_high']:.3f}"
+        logger.info(
+            f"[{gate_high}] {driver_label + ' high':<15} VarRatio={result['var_ratio_high']:.3f} ADF-p={result['adf_pvalue_high']:.3f}",
+            event="STAGE1_DRIVER_GATE",
+            driver=f"{driver_label}_high",
+            gate=gate_high,
+            var_ratio=round(float(result["var_ratio_high"]), 3),
         )
 
         return
@@ -429,11 +502,12 @@ def print_stage1_driver_gate(
         else "WARN"
     )
 
-    print(
-        f"[{gate}] {driver_label:<15} "
-        f"model={result['model_used']:<5} "
-        f"VarRatio={result['var_ratio']:.3f} "
-        f"ADF-p={result['adf_pvalue']:.3f}"
+    logger.info(
+        f"[{gate}] {driver_label:<15} model={result['model_used']:<5} VarRatio={result['var_ratio']:.3f} ADF-p={result['adf_pvalue']:.3f}",
+        event="STAGE1_DRIVER_GATE",
+        driver=driver_label,
+        gate=gate,
+        var_ratio=round(float(result["var_ratio"]), 3),
     )
 
 
@@ -460,7 +534,7 @@ def run_stage1_drivers(
     stage1_results = {}
 
     for driver_label in drivers:
-        print(f"\n--- Stage 1T: {driver_label} ---")
+        logger.info(f"Stage 1T LOO: {driver_label}", event="STAGE1_T_START", driver=driver_label)
 
         confounders = driver_confounders[driver_label]
         reuse_key = (driver_label, tuple(sorted(confounders)))
@@ -474,7 +548,7 @@ def run_stage1_drivers(
         )
 
         if reuse_key in global_driver_residual_cache:
-            print(f"[RESIDUAL REUSE] {driver_label}")
+            logger.info(f"[RESIDUAL REUSE] {driver_label}", event="RESIDUAL_REUSE_HIT", driver=driver_label)
             result = global_driver_residual_cache[reuse_key]
 
         else:
@@ -488,11 +562,13 @@ def run_stage1_drivers(
             )
 
             if result is not None:
-                print(f"[USING CACHE] {driver_label}: Stage 1T calculation skipped")
+                logger.info(f"[USING CACHE] {driver_label}: Stage 1T calculation skipped", event="STAGE1_CACHE_HIT", driver=driver_label)
 
             else:
-                print(
-                    f"[CALCULATING] {driver_label}: running Stage 1T LOO residualization"
+                logger.info(
+                    f"[CALCULATING] {driver_label}: running Stage 1T LOO residualization",
+                    event="STAGE1_CALCULATING",
+                    driver=driver_label,
                 )
 
                 result = calculate_stage1_driver(
@@ -553,7 +629,7 @@ def run_stage1_y(
     y_cache_key = tuple(sorted(y_confounders))
 
     if y_cache_key in global_y_residual_cache:
-        print(f"[Y RESIDUAL REUSE] {y_cache_key}")
+        logger.info(f"[Y RESIDUAL REUSE] {y_cache_key}", event="Y_RESIDUAL_REUSE_HIT")
         return global_y_residual_cache[y_cache_key]
 
     ridge_alpha_y = config["alpha_stage1y"]
@@ -594,13 +670,13 @@ def run_stage1_y(
         else "WARN"
     )
 
-    print(
-        f"\n[{gate_y}] {'Outcome Y':<15} model=Ridge  "
-        f"VarRatio={var_ratio_y:.3f}  ADF-p={adf_pvalue_y:.3f}"
+    logger.info(
+        f"[{gate_y}] Outcome Y model=Ridge VarRatio={var_ratio_y:.3f} ADF-p={adf_pvalue_y:.3f} | Confounders: {y_confounders}",
+        event="STAGE1_Y_COMPLETE",
+        combination_id=combination_id,
+        gate=gate_y.strip(),
+        var_ratio=round(float(var_ratio_y), 3),
     )
-
-    print(f"Y confounders used: {y_confounders}")
-    print(f"{combination_id} -> {y_confounders}")
 
     result = (
         Y_residuals_train,
@@ -639,7 +715,7 @@ def select_stage2_alpha(T_residuals_train, Y_residuals_train, config):
 
     if config["alpha_stage2"] is not None:
         best_alpha = config["alpha_stage2"]
-        print(f"Using manual alpha = {best_alpha} (set via CONFIG['alpha_stage2'])")
+        logger.info(f"Using manual alpha = {best_alpha} (set via CONFIG['alpha_stage2'])", event="STAGE2_ALPHA_MANUAL")
         return best_alpha, alphas_to_try, val_n
 
     validation_r2 = [
@@ -652,9 +728,11 @@ def select_stage2_alpha(T_residuals_train, Y_residuals_train, config):
 
     best_alpha = float(alphas_to_try[int(np.argmax(validation_r2))])
 
-    print(
-        f"Auto-selected alpha = {best_alpha:.4f} "
-        f"(best R² on last {val_n} training rows)"
+    logger.info(
+        f"Auto-selected alpha = {best_alpha:.4f} (best R² on last {val_n} training rows)",
+        event="STAGE2_ALPHA_AUTOCONFIG",
+        best_alpha=round(float(best_alpha), 4),
+        val_rows=val_n,
     )
 
     return best_alpha, alphas_to_try, val_n
@@ -707,9 +785,11 @@ def run_stage2(
 
     if train_only:
         r2_test = None
-        print(
-            f"Joint Ridge alpha={best_alpha:.4f} "
-            f"R²_train={r2_train:.4f} R²_test=SKIPPED"
+        logger.info(
+            f"Joint Ridge alpha={best_alpha:.4f} R²_train={r2_train:.4f} R²_test=SKIPPED",
+            event="STAGE2_ESTIMATION",
+            alpha=round(float(best_alpha), 4),
+            r2_train=round(float(r2_train), 4),
         )
     else:
         r2_test = (
@@ -723,9 +803,12 @@ def run_stage2(
 
         r2_test_text = f"{r2_test:.4f}" if r2_test is not None else "N/A"
 
-        print(
-            f"Joint Ridge alpha={best_alpha:.4f} "
-            f"R²_train={r2_train:.4f} R²_test={r2_test_text}"
+        logger.info(
+            f"Joint Ridge alpha={best_alpha:.4f} R²_train={r2_train:.4f} R²_test={r2_test_text}",
+            event="STAGE2_ESTIMATION",
+            alpha=round(float(best_alpha), 4),
+            r2_train=round(float(r2_train), 4),
+            r2_test=round(float(r2_test), 4) if r2_test is not None else None,
         )
 
     joint_elasticities = dict(zip(joint_drivers, joint_model.coef_))
@@ -817,27 +900,25 @@ def run_stage2(
 
 
 def print_elasticity_results(stage2_results):
-    """Print Stage 2 elasticity output."""
+    """Log Stage 2 elasticity output."""
     diagnostics = stage2_results["diagnostics"]
     pw_drivers = stage2_results["pw_drivers"]
-
-    print("\n" + "=" * 78)
-    print(f"{'Driver':<15} {'Elasticity':>12} {'Sign OK':>8}  {'R²_test':>8}  Method")
-    print("=" * 78)
 
     for driver_label, diag in diagnostics.items():
         sign_flag = "YES" if diag["sign_ok"] else "NO *"
         r2_str = f"{diag['r2_test']:.3f}" if diag["r2_test"] is not None else "N/A"
-
-        print(
-            f"{driver_label:<15} {diag['elasticity']:>12.4f} "
-            f"{sign_flag:>8} {r2_str:>8}  {diag['method']}"
+        logger.info(
+            f"Driver: {driver_label:<15} Elasticity: {diag['elasticity']:>10.4f} SignOK: {sign_flag:>5} R²_test: {r2_str:>7} Method: {diag['method']}",
+            event="STAGE2_DRIVER_RESULT",
+            driver=driver_label,
+            elasticity=diag["elasticity"],
+            sign_ok=diag["sign_ok"],
+            r2_test=diag["r2_test"],
+            method=diag["method"],
         )
 
     if not pw_drivers:
         return
-
-    print("\n=== Piecewise Driver Elasticities (value-knot) ===")
 
     for d in pw_drivers:
         knot = diagnostics[d]["knot"]
@@ -847,122 +928,18 @@ def print_elasticity_results(stage2_results):
         def contribution(t):
             return e_low * min(t, knot) + e_high * max(t - knot, 0.0)
 
-        print(
-            f"{d:<15} knot={knot:.2f} "
-            f"e_low={e_low:.4f} e_high={e_high:.4f} "
-            f"@40%={contribution(0.40):.4f} "
-            f"@60%={contribution(0.60):.4f} "
-            f"@80%={contribution(0.80):.4f}"
+        logger.info(
+            f"Piecewise {d}: knot={knot:.2f} e_low={e_low:.4f} e_high={e_high:.4f} "
+            f"@40%={contribution(0.40):.4f} @60%={contribution(0.60):.4f} @80%={contribution(0.80):.4f}",
+            event="STAGE2_PIECEWISE_RESULT",
+            driver=d,
+            knot=knot,
+            e_low=e_low,
+            e_high=e_high,
         )
 
 
-# =============================================================================
-# ELASTICITY PLOT
-# =============================================================================
 
-
-def create_elasticity_scatter_plot(
-    stage1_results,
-    diagnostics,
-    Y_residuals_train,
-    drivers,
-    config,
-    output_dir,
-):
-    """Create Stage 2 elasticity scatter plots."""
-    n_drivers = len(drivers)
-    n_cols = 4
-    n_rows = (n_drivers + n_cols - 1) // n_cols
-
-    fig, axes = plt.subplots(n_rows, n_cols, figsize=(16, 4 * n_rows))
-    axes = np.atleast_1d(axes).flatten()
-
-    for idx, (driver_label, diag) in enumerate(diagnostics.items()):
-        ax = axes[idx]
-        T_res = stage1_results[driver_label]["train_residuals"]
-        sign_ok = diag["sign_ok"]
-
-        point_colour = "#1976D2" if sign_ok else "#C62828"
-        bg_colour = "#e3f2fd" if sign_ok else "#ffebee"
-
-        ax.scatter(
-            T_res,
-            Y_residuals_train,
-            alpha=0.65,
-            s=35,
-            color=point_colour,
-            zorder=3,
-        )
-
-        x_range = np.linspace(T_res.min(), T_res.max(), 100)
-
-        if driver_label in config.get("piecewise_drivers", {}):
-            knot = diag["knot"]
-            e_low = diag["e_low"]
-            e_high = diag["e_high"]
-
-            y_piecewise = e_low * np.minimum(x_range, knot) + e_high * np.maximum(
-                x_range - knot, 0.0
-            )
-
-            ax.plot(x_range, y_piecewise, "k--", lw=1.5, label="piecewise")
-            ax.axvline(knot, color="gray", lw=0.8, ls="--", alpha=0.6)
-
-            ax.plot(
-                x_range[x_range <= knot],
-                e_low * np.minimum(x_range[x_range <= knot], knot),
-                lw=1.2,
-                ls=":",
-                label=f"e_low={e_low:.3f}",
-            )
-
-            ax.plot(
-                x_range[x_range >= knot],
-                e_low * knot
-                + e_high * np.maximum(x_range[x_range >= knot] - knot, 0.0),
-                lw=1.2,
-                ls=":",
-                label=f"e_high={e_high:.3f}",
-            )
-
-        else:
-            ax.plot(
-                x_range,
-                diag["elasticity"] * x_range,
-                "k--",
-                lw=1.5,
-                label=f"e = {diag['elasticity']:.3f}",
-            )
-
-        ax.axhline(0, color="gray", lw=0.5)
-        ax.axvline(0, color="gray", lw=0.5)
-        ax.set_title(driver_label, fontsize=9, fontweight="bold")
-        ax.set_xlabel("Driver residual (Stage 1T)", fontsize=8)
-        ax.set_ylabel("Orders residual (Stage 1Y)", fontsize=8)
-        ax.legend(fontsize=8, loc="upper left")
-        ax.set_facecolor(bg_colour)
-
-    for idx in range(n_drivers, len(axes)):
-        axes[idx].set_visible(False)
-
-    plt.suptitle(
-        f"DML Stage 2 - {config['division_name']}: Driver vs Orders Residuals\n"
-        "Blue = expected sign | Red = unexpected sign",
-        fontsize=11,
-        y=1.01,
-    )
-
-    plt.tight_layout()
-
-    output_path = (
-        output_dir
-        / f"DML_elasticity_scatter_{config['division_name'].replace(' ', '_')}.png"
-    )
-
-    plt.savefig(output_path, dpi=120, bbox_inches="tight")
-    plt.close(fig)
-
-    print(f"Plot saved: {output_path}")
 
 
 # =============================================================================
@@ -980,14 +957,9 @@ def run_data_quality_diagnostics(
     max_adf_pvalue,
     config,
 ):
-    """Print pre-stage and Stage 1 diagnostic information."""
-    print("=== Pre-Stage Data Quality Checks ===")
-
+    """Log pre-stage and Stage 1 diagnostic information."""
     if test_df.empty:
-        y_var_ratio = None
-        y_mean_shift = None
-        print("  Skipped - entire available period is used for training.")
-
+        logger.info("Pre-Stage Checks: entire available period used for training", event="PRE_STAGE_CHECKS")
     else:
         thresholds = config.get("data_quality_thresholds", {})
 
@@ -1011,10 +983,14 @@ def run_data_quality_diagnostics(
             else "WARN - test period looks different from train"
         )
 
-        print(f"  Y variance ratio (test/train) : {y_var_ratio:.3f}  {var_status}")
-        print(f"  Y distribution shift          : {y_mean_shift:.3f}  {shift_status}")
-
-    print("\n=== Stage 1 Gate (per driver) ===")
+        logger.info(
+            f"Pre-Stage: Y variance ratio (test/train): {y_var_ratio:.3f} ({var_status}) | shift: {y_mean_shift:.3f} ({shift_status})",
+            event="PRE_STAGE_CHECKS",
+            var_ratio=round(float(y_var_ratio), 3),
+            shift=round(float(y_mean_shift), 3),
+            var_status=var_status,
+            shift_status=shift_status,
+        )
 
     for driver_label in drivers:
         result = stage1_results[driver_label]
@@ -1031,31 +1007,15 @@ def run_data_quality_diagnostics(
 
         gate = "PASS" if both else ("WARN" if one else "FAIL")
 
-        print(
-            f"{driver_label:<15} "
-            f"VarRatio={result['var_ratio']:.3f} "
-            f"ADF-p={result['adf_pvalue']:.3f} "
-            f"Model={result['model_used']} "
-            f"Gate={gate}"
+        logger.info(
+            f"Stage 1 Gate: {driver_label:<15} VarRatio={result['var_ratio']:.3f} ADF-p={result['adf_pvalue']:.3f} Model={result['model_used']} Gate={gate}",
+            event="STAGE1_DRIVER_GATE",
+            driver=driver_label,
+            gate=gate,
+            var_ratio=round(float(result["var_ratio"]), 3),
+            adf_pvalue=round(float(result["adf_pvalue"]), 3) if pd.notna(result["adf_pvalue"]) else None,
+            model=result["model_used"],
         )
-
-    print("\n=== Final Elasticity Summary ===")
-
-    summary_df = pd.DataFrame.from_dict(diagnostics, orient="index")
-
-    print(
-        summary_df[
-            [
-                "elasticity",
-                "sign_ok",
-                "r2_test",
-                "stage1_model",
-                "var_ratio",
-                "adf_pvalue",
-                "method",
-            ]
-        ].to_string()
-    )
 
 
 # =============================================================================
@@ -1090,42 +1050,11 @@ def run_backtest(
 
     r2_backtest = r2_score(Y_residuals_train, Y_fitted)
 
-    fig, ax = plt.subplots(figsize=(13, 4))
-
-    ax.plot(
-        train_df["date"],
-        Y_residuals_train,
-        label="Actual (Y residual)",
-        lw=2,
-        color="#1565C0",
+    logger.info(
+        f"Back-test R² (training residuals): {r2_backtest:.4f}",
+        event="BACKTEST_EVALUATION",
+        r2_backtest=round(float(r2_backtest), 4),
     )
-
-    ax.plot(
-        train_df["date"],
-        Y_fitted,
-        label=f"Model fit R²={r2_backtest:.3f}",
-        lw=1.5,
-        ls="--",
-        color="#C62828",
-    )
-
-    ax.axhline(0, color="gray", lw=0.5)
-    ax.set_xlabel("Date")
-    ax.set_ylabel("YoY log-diff residual")
-    ax.legend(fontsize=9)
-    ax.xaxis.set_major_formatter(mdates.DateFormatter("%Y-%m"))
-
-    plt.xticks(rotation=30)
-    plt.tight_layout()
-
-    backtest_path = (
-        output_dir / f"DML_backtest_{config['division_name'].replace(' ', '_')}.png"
-    )
-
-    plt.savefig(backtest_path, dpi=120, bbox_inches="tight")
-    plt.close(fig)
-
-    print(f"Back-test R² (training residuals): {r2_backtest:.4f}")
 
     return r2_backtest
 
@@ -1280,18 +1209,16 @@ def run_contiguous_subsampling(
             )
 
     bootstrap_df = pd.DataFrame(bootstrap_rows)
-
-    print(
-        f"\n=== {ci_level:.0f}% CI from 75% contiguous slices " f"(n={n_bootstrap}) ==="
-    )
-
     for _, row in bootstrap_df.iterrows():
-        print(
-            f"{row['driver']:<20} "
-            f"{row['elasticity']:>12.4f} "
-            f"{row['standard_error']:>12.4f} "
-            f"{row['ci_lower']:>12.4f} "
-            f"{row['ci_upper']:>12.4f}"
+        logger.info(
+            f"Subsampling CI: {row['driver']:<15} Elasticity: {row['elasticity']:>10.4f} SE: {row['standard_error']:>10.4f} CI: [{row['ci_lower']:>10.4f}, {row['ci_upper']:>10.4f}] Sig: {row['significant']}",
+            event="SUBSAMPLING_CI",
+            driver=row["driver"],
+            elasticity=round(float(row["elasticity"]), 4),
+            se=round(float(row["standard_error"]), 4),
+            ci_lower=round(float(row["ci_lower"]), 4),
+            ci_upper=round(float(row["ci_upper"]), 4),
+            significant=bool(row["significant"]),
         )
 
     return {
@@ -1483,47 +1410,6 @@ def run_driver_selection(
     resid_df = pd.DataFrame(T_residuals_train, columns=driver_labels)
     corr_mat = resid_df.corr()
     n_d = len(driver_labels)
-
-    fig, ax = plt.subplots(figsize=(max(5, n_d * 1.5), max(4, n_d * 1.3)))
-
-    image = ax.imshow(
-        corr_mat.values,
-        vmin=-1,
-        vmax=1,
-        cmap="RdBu_r",
-        aspect="auto",
-    )
-
-    plt.colorbar(image, ax=ax, shrink=0.8)
-
-    ax.set_xticks(range(n_d))
-    ax.set_xticklabels(driver_labels, rotation=30, ha="right", fontsize=9)
-    ax.set_yticks(range(n_d))
-    ax.set_yticklabels(driver_labels, fontsize=9)
-
-    for i in range(n_d):
-        for j in range(n_d):
-            value = corr_mat.values[i, j]
-
-            ax.text(
-                j,
-                i,
-                f"{value:.2f}",
-                ha="center",
-                va="center",
-                fontsize=8,
-                color="white" if abs(value) > 0.6 else "black",
-            )
-
-    plt.tight_layout()
-
-    residual_corr_path = (
-        output_dir
-        / f"DML_residual_corr_{config['division_name'].replace(' ', '_')}.png"
-    )
-
-    plt.savefig(residual_corr_path, dpi=120, bbox_inches="tight")
-    plt.close(fig)
 
     flagged_pairs = []
 
@@ -1756,13 +1642,15 @@ def run_driver_selection(
 
         knot = float(config["piecewise_drivers"][driver])
         T_log = train_df[f"{driver}_T"].values
-
-        print(f"\n=== Knot Diagnostics: {driver} ===")
-        print(f"knot = {knot}")
-        print(f"min log-YoY T = {np.nanmin(T_log):.4f}")
-        print(f"max log-YoY T = {np.nanmax(T_log):.4f}")
-        print(f"rows above knot = {(T_log > knot).sum()} out of {len(T_log)}")
-        print(f"share above knot = {(T_log > knot).mean():.2%}")
+        above_count = int((T_log > knot).sum())
+        above_share = float((T_log > knot).mean())
+        logger.info(
+            f"Knot Diagnostics: {driver} | knot={knot:.4f} min={np.nanmin(T_log):.4f} max={np.nanmax(T_log):.4f} above={above_count}/{len(T_log)} ({above_share:.1%})",
+            event="KNOT_DIAGNOSTICS",
+            driver=driver,
+            knot=knot,
+            above_share=above_share,
+        )
 
     keep_list = [d for d, verdict in verdicts.items() if verdict == "KEEP"]
     review_list = [d for d, verdict in verdicts.items() if verdict == "REVIEW"]
@@ -2110,7 +1998,7 @@ def write_excel_report(report_tables, output_excel):
                 index=False,
             )
 
-    print(f"\nExcel report saved to: {output_excel}")
+    logger.info(f"Excel report saved: {output_excel}", event="EXCEL_REPORT_SAVED", path=str(output_excel))
 
 
 # =============================================================================
@@ -2137,22 +2025,22 @@ def run_combination(
     max_adf_pvalue,
 ):
     """Run the complete DML workflow for one driver combination."""
-    print("\n\n" + "=" * 120)
-    print(f"RUNNING {combination_id}")
-    print("=" * 120)
-
     drivers = {key: value for key, value in all_drivers.items() if key in combo}
     driver_confounders = {d: global_driver_confounders[d] for d in drivers}
     y_confounders = global_y_confounders.copy()
 
-    print(f"Drivers in combination: {list(drivers.keys())}")
-    print(f"Y confounders: {y_confounders}")
+    logger.info(
+        f"Running combination {combination_id} | Drivers: {list(drivers.keys())} | Y confounders: {y_confounders}",
+        event="RUN_COMBINATION_START",
+        combination_id=combination_id,
+        drivers=list(drivers.keys()),
+    )
 
     # -------------------------------------------------------------------------
     # Stage 1T
     # -------------------------------------------------------------------------
 
-    print("\n[Step 1] Running Stage 1T...")
+    logger.info(f"[{combination_id}] Step 1: Running Stage 1T...", event="STAGE1_T_START")
 
     stage1_results = run_stage1_drivers(
         combination_id=combination_id,
@@ -2173,7 +2061,7 @@ def run_combination(
     # Stage 1Y
     # -------------------------------------------------------------------------
 
-    print("\n[Step 2] Running Stage 1Y...")
+    logger.info(f"[{combination_id}] Step 2: Running Stage 1Y...", event="STAGE1_Y_START")
 
     (
         Y_residuals_train,
@@ -2197,7 +2085,7 @@ def run_combination(
     # Stage 2
     # -------------------------------------------------------------------------
 
-    print("\n[Step 3] Estimating Stage 2 elasticities...")
+    logger.info(f"[{combination_id}] Step 3: Estimating Stage 2 elasticities...", event="STAGE2_START")
 
     stage2_results = run_stage2(
         drivers=drivers,
@@ -2210,26 +2098,13 @@ def run_combination(
 
     print_elasticity_results(stage2_results)
 
-    # -------------------------------------------------------------------------
-    # Plots
-    # -------------------------------------------------------------------------
 
-    print("\n[Step 4] Creating elasticity scatter plots...")
-
-    create_elasticity_scatter_plot(
-        stage1_results=stage1_results,
-        diagnostics=stage2_results["diagnostics"],
-        Y_residuals_train=Y_residuals_train,
-        drivers=drivers,
-        config=config,
-        output_dir=output_dir,
-    )
 
     # -------------------------------------------------------------------------
     # Diagnostics
     # -------------------------------------------------------------------------
 
-    print("\n[Step 5] Printing diagnostics...")
+    logger.info(f"[{combination_id}] Step 5: Printing diagnostics...", event="STAGE2_DIAGNOSTICS")
 
     run_data_quality_diagnostics(
         train_df=train_df,
@@ -2246,7 +2121,7 @@ def run_combination(
     # Validation
     # -------------------------------------------------------------------------
 
-    print("\n[Step 6] Running validation checks...")
+    logger.info(f"[{combination_id}] Step 6: Running validation checks...", event="STAGE2_VALIDATION")
 
     r2_backtest = run_backtest(
         train_df=train_df,
@@ -2275,7 +2150,7 @@ def run_combination(
     # Driver selection
     # -------------------------------------------------------------------------
 
-    print("\n[Step 7] Evaluating driver selection framework...")
+    logger.info(f"[{combination_id}] Step 7: Evaluating driver selection framework...", event="DRIVER_SELECTION")
 
     selection_results = run_driver_selection(
         stage1_results=stage1_results,
@@ -2311,10 +2186,11 @@ def run_combination(
     )
 
     train_end_label = pd.Timestamp(config["train_end"]).strftime("%Y-%m-%d")
+    div_name = str(config.get("division_name") or config.get("div") or "DIV").replace(" ", "_")
 
     output_excel = output_dir / (
         f"DML_full_report_"
-        f"{config['division_name'].replace(' ', '_')}_"
+        f"{div_name}_"
         f"{combination_id}_"
         f"{train_end_label}.xlsx"
     )
@@ -2331,8 +2207,9 @@ def run_combination(
 
 def write_combination_comparison(all_combination_results, config, output_dir):
     """Write final workbook containing results for every combination."""
+    div_name = str(config.get("division_name") or config.get("div") or "DIV").replace(" ", "_")
     comparison_excel = (
-        output_dir / f"DML_window_comparison_{config['division_name']}.xlsx"
+        output_dir / f"DML_window_comparison_{div_name}.xlsx"
     )
 
     master_summary_rows = []
@@ -2373,7 +2250,7 @@ def write_combination_comparison(all_combination_results, config, output_dir):
             index=False,
         )
 
-    print(f"\nWindow comparison workbook saved:\n{comparison_excel}")
+    logger.info(f"Window comparison workbook saved: {comparison_excel}", event="COMPARISON_SAVED", path=str(comparison_excel))
 
 
 # =============================================================================
@@ -2406,7 +2283,7 @@ def main():
 
     if cache_enabled:
         cache_root.mkdir(parents=True, exist_ok=True)
-        print(f"Stage 1 cache directory: {cache_root.resolve()}")
+        logger.info(f"Stage 1 cache directory: {cache_root.resolve()}", event="CACHE_INIT", path=str(cache_root))
 
     # -------------------------------------------------------------------------
     # Data
@@ -2424,7 +2301,7 @@ def main():
         )
     )
 
-    print(f"Created {len(driver_combinations)} driver combinations")
+    logger.info(f"Created {len(driver_combinations)} driver combinations", event="COMBINATIONS_CREATED", count=len(driver_combinations))
 
     print_dataset_summary(
         config,
@@ -2437,9 +2314,7 @@ def main():
     # GLOBAL CONFOUNDER SELECTION
     # -------------------------------------------------------------------------
 
-    print("\n" + "=" * 120)
-    print("GLOBAL CONFOUNDER SELECTION")
-    print("=" * 120)
+    logger.info("Starting Global Confounder Selection...", event="GLOBAL_CONFOUNDERS_START")
 
     (
         global_driver_confounders,
@@ -2457,7 +2332,7 @@ def main():
         ),
     )
 
-    print("\nGlobal confounder selection completed.")
+    logger.info("Global confounder selection completed.", event="GLOBAL_CONFOUNDERS_COMPLETE")
 
     # -------------------------------------------------------------------------
     # GLOBAL RESIDUAL CACHES
@@ -2498,21 +2373,22 @@ def main():
 
         all_combination_results[combination_id] = elasticity_df.copy()
 
-        print(
-            f"\nStored {combination_id} | "
-            f"Total combinations stored = {len(all_combination_results)}"
+        logger.info(
+            f"Stored {combination_id} | Total combinations stored = {len(all_combination_results)}",
+            event="COMBINATION_STORED",
+            combination_id=combination_id,
+            count=len(all_combination_results),
         )
 
     # -------------------------------------------------------------------------
     # FINAL COMBINATION REPORT
     # -------------------------------------------------------------------------
 
-    print("\nAll combinations finished.")
-    print(f"Total combinations stored = {len(all_combination_results)}")
-
-    print("\nALL COMBINATION KEYS")
-    print(list(all_combination_results.keys()))
-    print("COUNT =", len(all_combination_results))
+    logger.info(
+        f"All combinations finished. Total combinations stored = {len(all_combination_results)}",
+        event="ALL_COMBINATIONS_FINISHED",
+        count=len(all_combination_results),
+    )
 
     write_combination_comparison(
         all_combination_results=all_combination_results,
@@ -2522,8 +2398,239 @@ def main():
 
 
 # =============================================================================
+# PIPELINE INTEGRATION & SCIENCE SEAMS
+# =============================================================================
+
+def fit_stage1_unit(unit: Dict[str, Any], train: pd.DataFrame, test: pd.DataFrame,
+                    date_col: str, learner_spec: Dict[str, Any]) -> Dict[str, np.ndarray]:
+    """Stage-1 nuisance fit: OLS of unit['column'] on its controls. Returns residuals arrays."""
+    def design(frame):
+        return np.column_stack([np.ones(len(frame))] + [frame[c].to_numpy(float) for c in unit["controls"]])
+
+    y_tr, y_te = train[unit["column"]].to_numpy(float), test[unit["column"]].to_numpy(float)
+    beta, *_ = np.linalg.lstsq(design(train), y_tr, rcond=None)
+    hat_tr, hat_te = design(train) @ beta, design(test) @ beta
+    return {
+        "train_dates": train[date_col].dt.strftime("%Y-%m-%d").to_numpy().astype("U10"),
+        "train_y_true": y_tr, "train_y_hat": hat_tr, "train_residuals": y_tr - hat_tr,
+        "test_dates": test[date_col].dt.strftime("%Y-%m-%d").to_numpy().astype("U10"),
+        "test_y_true": y_te, "test_y_hat": hat_te, "test_residuals": y_te - hat_te,
+    }
+
+
+def fit_stage2(y_res: np.ndarray, t_res: np.ndarray, y_res_test: np.ndarray, t_res_test: np.ndarray) -> Dict[str, float]:
+    """Stage-2: residual-on-residual slope with simple standard error."""
+    denom = float(np.sum(t_res ** 2))
+    if denom == 0.0 or len(t_res) < 3:
+        raise PipelineError(ErrorCategory.NUMERIC, "degenerate treatment residuals")
+    beta = float(np.sum(t_res * y_res) / denom)
+    se = math.sqrt(float(np.sum((y_res - beta * t_res) ** 2)) / (len(t_res) - 1) / denom)
+    sst = float(np.sum(y_res_test ** 2))
+    r2 = 1.0 - float(np.sum((y_res_test - beta * t_res_test) ** 2)) / sst if sst > 0 else float("nan")
+    p = math.erfc(abs(beta / se) / math.sqrt(2)) if se > 0 else float("nan")
+    return {"elasticity": beta, "std_error": se, "p_value": p, "r2": r2, "n_obs": len(t_res)}
+
+
+def _fit_safe(unit, train, test, date_col):
+    """Worker-side wrapper: unit-level science errors are returned (not raised) so one bad unit never aborts the pool."""
+    try:
+        return "ok", fit_stage1_unit(unit, train, test, date_col, unit["learner"])
+    except PipelineError as exc:
+        return "err", exc.category, str(exc)
+
+
+def _iter_fits(units, train, test, date_col, n_jobs):
+    """Yield fit results in input order. n_jobs>1 uses a loky process pool; n_jobs=1 stays in-process."""
+    if n_jobs > 1 and len(units) > 1:
+        from joblib import Parallel, delayed
+        os.environ.setdefault("OMP_NUM_THREADS", "1")
+        return Parallel(n_jobs=n_jobs, backend="loky", return_as="generator")(
+            delayed(_fit_safe)(u, train, test, date_col) for u in units)
+    return (_fit_safe(u, train, test, date_col) for u in units)
+
+
+def _plan(ctx, confounders, combos, fold, col_hash, dml_cfg):
+    """Stage-1 units (deduplicated by key) and the Stage-2 row plan.
+    For every combination C and driver t in C: controls = (C minus t) + confounders(t);
+    one outcome unit (Y ~ controls) and one treatment unit (t ~ controls)."""
+    train_window = f"{fold['train_start']}_{fold['train_end']}"
+    test_window = f"{fold['test_start']}_{fold['test_end']}"
+    column_of = {t["target_id"]: t["column"] for t in ctx.config.get("targets", [])}
+    cache_version = dml_cfg.get("cache_version", dml_cfg.get("stage1_cache", {}).get("cache_version", 1))
+    units, rows = {}, []
+    for combo in combos:
+        cid = combination_id(combo)
+        for t in combo:
+            controls = sorted(set(d for d in combo if d != t) | set(confounders.get(t, [])))
+            keys = {}
+            for role, variable in (("outcome", ctx.target), ("treatment", t)):
+                learner = dml_cfg.get("outcome_learner" if role == "outcome" else "treatment_learner", {"model": "Ridge", "alpha": 1.0})
+                column = column_of.get(variable, variable)
+                key = compute_unit_key(
+                    target=ctx.target, role=role, variable=variable, controls=controls,
+                    source_data_hash=fp({c: col_hash(c) for c in sorted([column] + controls)}),
+                    train_window=train_window, test_window=test_window,
+                    cache_version=cache_version)
+                units.setdefault(key, {"unit_key": key, "role": role, "variable": variable, "column": column,
+                                       "controls": controls, "learner": learner})
+                keys[role] = key
+            rows.append({"combination_id": cid, "treatment_kpi": t, "outcome_unit": keys["outcome"],
+                         "treatment_unit": keys["treatment"]})
+    return units, rows
+
+
+def run_dml_fold(ctx: StepContext) -> StepResult:
+    """Pipeline entry point for one DML fold:
+    Enumerates combinations -> checks Stage-1 cache -> fits misses -> fits Stage-2 ->
+    writes dml_result.parquet and stage1_refs.parquet to the canonical blob layout.
+    """
+    dml_cfg, fold, storage = ctx.config.get("dml", {}), ctx.fold_spec(), ctx.storage
+    date_col = ctx.config.get("data", {}).get("date_col", "date")
+    train_window = f"{fold['train_start']}_{fold['train_end']}"
+    n_jobs = int(ctx.config.get("execution", {}).get("n_jobs", 1))
+
+    set_active_scope(ctx.div, ctx.quarter)
+
+    cs_path = get_confounder_selection_path(ctx.upstream_run_id("confounder_selection"), ctx.target, ctx.div, ctx.quarter)
+    cs = ctx.require(cs_path)
+    confounders = {t["treatment_kpi"]: [c["kpi"] for c in t["confounders"]]
+                   for t in cs.get("treatments", []) if t.get("status") == "SUCCEEDED"}
+    combos = enumerate_combinations(list(confounders), ctx.config.get("combinations", {}))
+
+    manifest = ctx.manifest()
+    df = ctx.load_lagged_dataset().copy()
+    if "trend" not in df.columns:
+        df["trend"] = np.arange(len(df), dtype=float)
+    if "regime_dummy" not in df.columns:
+        regime_date = dml_cfg.get("regime_date", "2023-01-01")
+        if date_col in df.columns:
+            df["regime_dummy"] = (pd.to_datetime(df[date_col]) >= pd.Timestamp(regime_date)).astype(float)
+        else:
+            df["regime_dummy"] = 0.0
+
+    all_confs = set(c for conf_list in confounders.values() for c in conf_list)
+    for c in all_confs:
+        if c not in df.columns:
+            df[c] = 0.0
+
+    train = df[(df[date_col] >= fold["train_start"]) & (df[date_col] <= fold["train_end"])].copy()
+    test = df[(df[date_col] >= fold["test_start"]) & (df[date_col] <= fold["test_end"])].copy()
+    source_hash = (manifest.get("snapshot") or {}).get("snapshot_id", "default_hash")
+
+    hashes: Dict[str, str] = {}
+
+    def col_hash(col):
+        if col not in hashes:
+            hashes[col] = data_fp(train[[col]])
+        return hashes[col]
+
+    by_key, row_plan = _plan(ctx, confounders, combos, fold, col_hash, dml_cfg)
+    cache_mode = ctx.config.get("cache", {}).get("mode", "read_write")  # read_write | read_only | off
+    if cache_mode == "off":
+        hits, misses = set(), set(by_key)
+    else:
+        hits, misses = check_cache_hits(storage, ctx.target, train_window, list(by_key), div=ctx.div)
+    logger.info(f"{len(combos)} combinations, {len(row_plan)} rows; stage-1 cache: {len(hits)} hits, "
+                f"{len(misses)} misses of {len(by_key)} units", event="CACHE_EVAL",
+                counters={"combinations": len(combos), "units_total": len(by_key), "cache_hits": len(hits),
+                          "cache_misses": len(misses)})
+
+    residuals: Dict[str, Dict[str, np.ndarray]] = {}
+    unit_status: Dict[str, Dict[str, Any]] = {k: {"status": "HIT", "error": None} for k in hits}
+    repair = set()
+    for key in sorted(hits):
+        try:
+            residuals[key], _ = load_cached_unit(storage, ctx.target, train_window, key, div=ctx.div)
+        except Exception as exc:
+            logger.warning(f"cache entry unreadable, refitting: {exc}", event="CACHE_CORRUPT", unit_key=key)
+            hits.discard(key), misses.add(key), repair.add(key)
+            unit_status.pop(key, None)
+
+    to_fit = [by_key[k] for k in sorted(misses)]
+    every = max(1, len(to_fit) // 20)
+    logger.info(f"stage-1 fitting started for target '{ctx.target}', fold '{ctx.fold_id}': {len(to_fit)} units to fit",
+                event="STAGE1_STARTED", units_to_fit=len(to_fit))
+    for i, (unit, res) in enumerate(zip(to_fit, _iter_fits(to_fit, train, test, date_col, n_jobs)), 1):
+        key = unit["unit_key"]
+        if res[0] == "err":
+            _, category, message = res
+            if category not in UNIT_LEVEL_ERRORS:
+                raise PipelineError(category, message)
+            logger.warning(f"unit failed: {message}", event="UNIT_FAILED", error_category=category, unit_key=key)
+            unit_status[key] = {"status": "FAILED", "error": f"{category}: {message}"}
+            continue
+        arrays = res[1]
+        if cache_mode == "read_write":
+            cache_ver = dml_cfg.get("cache_version", dml_cfg.get("stage1_cache", {}).get("cache_version", 1))
+            metadata = CacheMetadataContract(
+                fingerprint=key, cache_version=cache_ver, role=unit["role"], target=ctx.target,
+                driver_col=unit["variable"], controls=unit["controls"],
+                train_start=fold["train_start"], train_end=fold["train_end"],
+                test_start=fold["test_start"], test_end=fold["test_end"], fold_id=ctx.fold_id,
+                source_file=(manifest.get("snapshot") or {}).get("uri", ""), source_data_hash=source_hash,
+                learner_spec=unit["learner"], inner_cv_splits=dml_cfg.get("inner_cv_splits", 3), seed=dml_cfg.get("seed", 42),
+                created_at=datetime.now(timezone.utc).isoformat(), producer_run_id=ctx.run_id).to_dict()
+            save_cached_unit(storage, ctx.target, train_window, key, arrays, metadata, overwrite=key in repair, div=ctx.div)
+        residuals[key] = arrays
+        unit_status[key] = {"status": "FITTED", "error": None}
+        if i % every == 0 or i == len(to_fit):
+            logger.info(f"stage-1 progress {i}/{len(to_fit)}", event="STAGE1_PROGRESS",
+                        counters={"fitted": i, "to_fit": len(to_fit)})
+
+    failed_units = sum(1 for s in unit_status.values() if s["status"] == "FAILED")
+    logger.info(f"stage-1 fitting completed for target '{ctx.target}', fold '{ctx.fold_id}'",
+                event="STAGE1_COMPLETED", counters={"units_total": len(by_key), "cache_hits": len(hits),
+                                                   "units_fitted": len(to_fit) - failed_units, "units_failed": failed_units})
+
+    logger.info(f"stage-2 estimation started for target '{ctx.target}', fold '{ctx.fold_id}': {len(row_plan)} rows planned",
+                event="STAGE2_STARTED", rows_planned=len(row_plan))
+    rows = []
+    for plan in row_plan:
+        o_key, t_key = plan["outcome_unit"], plan["treatment_unit"]
+        row = {"run_id": ctx.run_id, "target": ctx.target, "fold_id": ctx.fold_id, **plan,
+                "elasticity": np.nan, "std_error": np.nan, "p_value": np.nan, "r2": np.nan, "n_obs": 0,
+                "status": "FAILED", "error": None}
+        try:
+            if o_key not in residuals or t_key not in residuals:
+                raise PipelineError(ErrorCategory.MODEL_CONVERGENCE, "stage-1 unit failed")
+            o, t = residuals[o_key], residuals[t_key]
+            row.update(fit_stage2(o["train_residuals"], t["train_residuals"],
+                                  o["test_residuals"], t["test_residuals"]), status="SUCCEEDED")
+        except PipelineError as exc:
+            if exc.category not in UNIT_LEVEL_ERRORS:
+                raise
+            row["error"] = f"{exc.category}: {exc}"
+        rows.append(row)
+
+    failed_rows = sum(1 for r in rows if r["status"] == "FAILED")
+    logger.info(f"stage-2 estimation completed for target '{ctx.target}', fold '{ctx.fold_id}': {len(rows) - failed_rows} succeeded, {failed_rows} failed",
+                event="STAGE2_COMPLETED", counters={"rows_total": len(rows), "rows_succeeded": len(rows) - failed_rows, "rows_failed": failed_rows})
+
+    refs = pd.DataFrame([{"unit_key": u["unit_key"], "role": u["role"], "variable": u["variable"],
+                          "controls": ",".join(u["controls"]), **unit_status[u["unit_key"]]}
+                         for u in by_key.values()])
+    result_path = get_dml_result_path(ctx.run_id, ctx.target, ctx.fold_id, ctx.div, ctx.quarter)
+    refs_path = get_stage1_refs_path(ctx.run_id, ctx.target, ctx.fold_id, ctx.div, ctx.quarter)
+
+    storage.write_parquet(result_path, pd.DataFrame(rows))
+    storage.write_parquet(refs_path, refs)
+    logger.info(f"dml outputs written for target '{ctx.target}', fold '{ctx.fold_id}'", event="OUTPUT_WRITTEN",
+                outputs=[result_path, refs_path], target=ctx.target, fold_id=ctx.fold_id)
+
+    return StepResult(
+        outputs=[result_path, refs_path],
+        counters={"combinations": len(combos), "rows": len(rows), "rows_failed": failed_rows,
+                  "units_total": len(by_key), "cache_hits": len(hits),
+                  "units_fitted": len(to_fit) - failed_units, "units_failed": failed_units},
+        warnings=[f"{failed_rows} row(s) FAILED"] if failed_rows else [],
+        status="PARTIAL" if failed_rows else "SUCCEEDED",
+    )
+
+
+# =============================================================================
 # ENTRY POINT
 # =============================================================================
 
 if __name__ == "__main__":
     main()
+

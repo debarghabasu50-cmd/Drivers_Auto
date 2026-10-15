@@ -19,14 +19,14 @@ def combination_id(drivers: Tuple[str, ...]) -> str:
 def enumerate_combinations(drivers: List[str], cfg: Dict[str, Any]) -> List[Tuple[str, ...]]:
     """Sorted driver tuples. The cap keeps the combinations with the smallest id hash, so the selection is
     reproducible, independent of input order, and unbiased with respect to driver names."""
-    k = int(cfg["drivers_per_combo"])
+    k = int(cfg.get("drivers_per_combo", cfg.get("combination_size", 3)))
     cap = cfg.get("max_combinations")
     must = sorted(cfg.get("must_include", []))
     pool = sorted(set(drivers))
 
     if k < 1 or k > len(pool):
         raise PipelineError(ErrorCategory.CONFIG,
-                            f"drivers_per_combo={k} needs 1..{len(pool)} selected drivers, got {len(pool)}")
+                            f"combination_size={k} needs 1..{len(pool)} selected drivers, got {len(pool)}")
     unknown = [m for m in must if m not in pool]
     if unknown or len(must) > k:
         raise PipelineError(ErrorCategory.CONFIG,
@@ -41,7 +41,7 @@ def enumerate_combinations(drivers: List[str], cfg: Dict[str, Any]) -> List[Tupl
 
 def expected_rows(n_drivers: int, cfg: Dict[str, Any]) -> int:
     """Rows per fold = combinations x k (one elasticity per driver per combination), without enumerating."""
-    k = int(cfg["drivers_per_combo"])
+    k = int(cfg.get("drivers_per_combo", cfg.get("combination_size", 3)))
     must = len(cfg.get("must_include", []))
     total = comb(n_drivers - must, k - must)
     cap = cfg.get("max_combinations")

@@ -74,7 +74,7 @@ class StepContext:
             return fp({"snapshot": self.manifest()["snapshot"]["snapshot_id"], "data": c["data"],
                        "targets": c["targets"], "kpis": c["kpis"], "params": c["feature_selection"]})
         if step == "confounder_selection":
-            return fp({"upstream": self.step_fp("feature_selection"), "confounders": c["confounders"]})
+            return fp({"upstream": self.step_fp("feature_selection"), "confounders": c.get("confounders", {})})
         raise ValueError(f"step '{step}' is not reusable")
 
     def upstream_run_id(self, upstream_step: str, target: Optional[str] = None) -> str:
