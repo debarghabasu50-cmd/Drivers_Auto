@@ -155,6 +155,12 @@ def get_stage1_refs_path(run_id: str, target: str, fold_id: str, div: Optional[s
     return f"runs/{d}/{q}/{run_id}/dml/{target}/fold={fold_id}/stage1_refs.parquet"
 
 
+def get_dml_diagnostics_path(run_id: str, target: str, fold_id: str, div: Optional[str] = None, quarter: Optional[str] = None) -> str:
+    """Path to fold DML diagnostics json inside run workspace."""
+    d, q = resolve_scope(div, quarter)
+    return f"runs/{d}/{q}/{run_id}/dml/{target}/fold={fold_id}/dml_diagnostics.json"
+
+
 # ---------------------------------------------------------------------------
 # Consumer serving layer: published/{div}/{quarter}/
 # ---------------------------------------------------------------------------

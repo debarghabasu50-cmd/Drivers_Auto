@@ -131,7 +131,7 @@ def test_feature_selection_emits_lagged_features_and_common_confounders(tmp_path
 
 
 def test_simplified_cache_unit_key():
-    from components.residual_caching.residual_caching import compute_unit_key
+    from components.residual_caching.cache import compute_unit_key
 
     # Call with basic params
     key_base = compute_unit_key(

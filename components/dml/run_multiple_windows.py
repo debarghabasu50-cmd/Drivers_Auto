@@ -29,11 +29,13 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
+from shared.logging import logger
+
 # =============================================================================
 # CONSTANTS
 # =============================================================================
 
-DEFAULT_DML_SCRIPT = "dml_analysis.py"
+DEFAULT_DML_SCRIPT = str(Path(__file__).parent / "dml_analysis.py")
 DEFAULT_OUTPUT_DIR = "dml_outputs"
 MAX_PARALLEL_WINDOWS = 2
 
@@ -74,8 +76,9 @@ def load_config(config_path: Path) -> dict:
     if not config_path.exists():
         raise FileNotFoundError(f"Config file not found: {config_path}")
 
-    with config_path.open("r", encoding="utf-8") as file:
-        return json.load(file)
+    from components.dml.dml_analysis import load_config as load_dml_config
+
+    return load_dml_config(config_path)
 
 
 def validate_dml_script(dml_script_path: Path) -> None:
@@ -106,14 +109,19 @@ def validate_train_end_dates(values: list[str]) -> list[str]:
 
 
 def get_train_end_dates(config: dict) -> list[str]:
-    """Get training cutoffs from either train_end_dates or train_end."""
+    """Get training cutoffs from either train_end_dates, folds, or train_end."""
     if "train_end_dates" in config:
         return validate_train_end_dates(config["train_end_dates"])
+
+    if "folds" in config:
+        fold_dates = [f["train_end"] for f in config["folds"] if isinstance(f, dict) and "train_end" in f]
+        if fold_dates:
+            return validate_train_end_dates(fold_dates)
 
     if "train_end" in config:
         return validate_train_end_dates([config["train_end"]])
 
-    raise KeyError("Config must contain either 'train_end_dates' or 'train_end'.")
+    raise KeyError("Config must contain either 'train_end_dates', 'folds', or 'train_end'.")
 
 
 # =============================================================================
@@ -207,8 +215,15 @@ def execute_dml(
         str(window_config_path),
     ]
 
+    import os
+    repo_root = str(Path(__file__).resolve().parents[2])
+    env = os.environ.copy()
+    current_pp = env.get("PYTHONPATH", "")
+    env["PYTHONPATH"] = f"{repo_root}{os.pathsep}{current_pp}" if current_pp else repo_root
+
     subprocess.run(
         command,
+        env=env,
         check=True,
     )
 
@@ -225,11 +240,11 @@ def run_single_window(
     dml_script_path: Path,
 ) -> dict:
     """Prepare and execute one independent DML training window."""
-    print("\n" + "=" * 80)
-    print(f"STARTING WINDOW: {train_end}")
-    print(f"Training rule : date < {train_end}")
-    print(f"Test rule     : date >= {train_end}")
-    print("=" * 80)
+    logger.info(
+        f"STARTING WINDOW: {train_end} (train < {train_end}, test >= {train_end})",
+        event="WINDOW_START",
+        train_end=train_end,
+    )
 
     window_output_dir = get_window_output_dir(
         division_output_dir,
@@ -247,15 +262,20 @@ def run_single_window(
         window_output_dir,
     )
 
-    print(f"Config : {window_config_path}")
-    print(f"Output : {window_output_dir}")
+    logger.info(
+        f"Window {train_end} | Config: {window_config_path} | Output: {window_output_dir}",
+        event="WINDOW_CONFIG_READY",
+        train_end=train_end,
+        config_path=str(window_config_path),
+        output_dir=str(window_output_dir),
+    )
 
     execute_dml(
         dml_script_path,
         window_config_path,
     )
 
-    print(f"\nCOMPLETED WINDOW: {train_end}")
+    logger.info(f"COMPLETED WINDOW: {train_end}", event="WINDOW_COMPLETE", train_end=train_end)
 
     return {
         "train_end": train_end,
@@ -281,12 +301,12 @@ def run_windows_parallel(
         MAX_PARALLEL_WINDOWS,
     )
 
-    print("\n" + "=" * 80)
-    print("PARALLEL WINDOW EXECUTION")
-    print("=" * 80)
-    print(f"Training windows : {len(train_end_dates)}")
-    print(f"Parallel workers : {max_workers}")
-    print(f"Windows          : {train_end_dates}")
+    logger.info(
+        f"PARALLEL WINDOW EXECUTION | Windows: {len(train_end_dates)} | Workers: {max_workers} | Cutoffs: {train_end_dates}",
+        event="PARALLEL_EXECUTION_START",
+        num_windows=len(train_end_dates),
+        max_workers=max_workers,
+    )
 
     completed_runs = []
 
@@ -309,17 +329,23 @@ def run_windows_parallel(
                 result = future.result()
 
             except Exception as exc:
-                print(f"FAILED WINDOW: {train_end}")
-                print(f"ERROR        : {exc}")
-                print("!" * 80)
-
+                logger.error(
+                    f"FAILED WINDOW: {train_end} - {exc}",
+                    event="WINDOW_FAILED",
+                    error_category="WINDOW_EXECUTION_ERROR",
+                    train_end=train_end,
+                    exc=str(exc),
+                )
                 raise
 
             completed_runs.append(result)
 
-            print(
-                f"\nFinished {train_end} | "
-                f"{len(completed_runs)}/{len(train_end_dates)} complete"
+            logger.info(
+                f"Finished {train_end} | {len(completed_runs)}/{len(train_end_dates)} complete",
+                event="WINDOW_PROGRESS",
+                train_end=train_end,
+                completed=len(completed_runs),
+                total=len(train_end_dates),
             )
 
     return sorted(
@@ -334,15 +360,17 @@ def run_windows_parallel(
 
 
 def print_execution_summary(completed_runs: list[dict]) -> None:
-    """Print a summary after all training windows finish."""
-    print("\n" + "=" * 80)
-    print("ALL DML TRAINING WINDOWS COMPLETED SUCCESSFULLY")
-    print("=" * 80)
+    """Log a summary after all training windows finish."""
+    logger.info("ALL DML TRAINING WINDOWS COMPLETED SUCCESSFULLY", event="ALL_WINDOWS_COMPLETE", count=len(completed_runs))
 
     for run in completed_runs:
-        print(f"\nTrain end     : {run['train_end']}")
-        print(f"Output folder : {run['output_dir']}")
-        print(f"Config used   : {run['config_path']}")
+        logger.info(
+            f"Window: {run['train_end']} | Output: {run['output_dir']} | Config: {run['config_path']}",
+            event="WINDOW_SUMMARY",
+            train_end=run["train_end"],
+            output_dir=str(run["output_dir"]),
+            config_path=str(run["config_path"]),
+        )
 
 
 # =============================================================================
