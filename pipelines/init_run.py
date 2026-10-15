@@ -82,15 +82,11 @@ def run_init(ctx: StepContext) -> StepResult:
         df = storage.read_parquet(input_uri)
     elif storage.is_mock:
         repo_root = Path(__file__).resolve().parents[1]
-        local_candidates = [
-            Path(input_uri),
-            repo_root / input_uri,
-            repo_root / "data" / Path(input_uri).name,
-            Path("data") / Path(input_uri).name,
-        ]
-        local_path = next((p for p in local_candidates if p.is_file()), None)
-        if local_path is not None:
-            df = pd.read_parquet(local_path)
+        default_blob = repo_root / ".mock_blob" / "drivers-pipeline" / input_uri
+        local_data = repo_root / "data" / Path(input_uri).name
+        source = default_blob if default_blob.is_file() else (local_data if local_data.is_file() else None)
+        if source:
+            df = pd.read_parquet(source)
             storage.write_parquet(input_uri, df, overwrite=False)
         else:
             raise PipelineError(ErrorCategory.UPSTREAM_MISSING, f"input not found: {input_uri}")
