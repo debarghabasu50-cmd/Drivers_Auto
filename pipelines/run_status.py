@@ -32,25 +32,41 @@ def _duration(status: dict) -> str:
     return f"{(end - start).total_seconds():.1f}s"
 
 
+def _find_manifest(storage, run_id: str, div: Optional[str] = None, quarter: Optional[str] = None) -> Optional[str]:
+    """Find manifest path in O(1) via direct path or discovery index before falling back to blob listing."""
+    path = get_manifest_path(run_id, div, quarter)
+    if storage.exists(path):
+        return path
+    index_ptr = f"runs/_index/{run_id}.json"
+    if storage.exists(index_ptr):
+        idx = storage.read_json(index_ptr)
+        d, q = idx.get("div"), idx.get("quarter")
+        scoped_path = get_manifest_path(run_id, d, q)
+        if storage.exists(scoped_path):
+            return scoped_path
+    matching = [b for b in storage.list_blobs("runs/") if b.replace("\\", "/").endswith(f"/{run_id}/run_manifest.json")]
+    return matching[0] if matching else None
+
+
 def render(storage, run_id: str, div: Optional[str] = None, quarter: Optional[str] = None) -> str:
-    manifest_path = get_manifest_path(run_id, div, quarter)
-    if not storage.exists(manifest_path):
-        # Discover manifest under any div/quarter
-        matching = [b for b in storage.list_blobs("runs/") if b.replace("\\", "/").endswith(f"/{run_id}/run_manifest.json")]
-        if matching:
-            manifest_path = matching[0]
-        else:
-            init_status_path = get_task_status_path(run_id, "init_run", div, quarter)
-            if not storage.exists(init_status_path):
+    manifest_path = _find_manifest(storage, run_id, div, quarter)
+    if not manifest_path:
+        init_status_path = get_task_status_path(run_id, "init_run", div, quarter)
+        if not storage.exists(init_status_path):
+            index_ptr = f"runs/_index/{run_id}.json"
+            if storage.exists(index_ptr):
+                idx = storage.read_json(index_ptr)
+                init_status_path = get_task_status_path(run_id, "init_run", idx.get("div"), idx.get("quarter"))
+            else:
                 matching_st = [b for b in storage.list_blobs("runs/") if b.replace("\\", "/").endswith(f"/{run_id}/status/init_run.json")]
                 if matching_st:
                     init_status_path = matching_st[0]
-            if storage.exists(init_status_path):
-                init_st = storage.read_json(init_status_path)
-                if init_st.get("status") == "FAILED":
-                    err_msg = (init_st.get("error") or {}).get("message", "unknown error")
-                    return f"run {run_id}: status=FAILED (init_run failed: {err_msg})"
-            return f"run {run_id}: no manifest yet (init_run has not completed)"
+        if storage.exists(init_status_path):
+            init_st = storage.read_json(init_status_path)
+            if init_st.get("status") == "FAILED":
+                err_msg = (init_st.get("error") or {}).get("message", "unknown error")
+                return f"run {run_id}: status=FAILED (init_run failed: {err_msg})"
+        return f"run {run_id}: no manifest yet (init_run has not completed)"
     
     manifest = storage.read_json(manifest_path)
     d = manifest.get("plan", {}).get("div", div)
@@ -76,22 +92,23 @@ def render(storage, run_id: str, div: Optional[str] = None, quarter: Optional[st
 
 def is_run_terminal(storage, run_id: str, div: Optional[str] = None, quarter: Optional[str] = None) -> bool:
     """Check if the run has reached a terminal status (from manifest or task status files)."""
-    manifest_path = get_manifest_path(run_id, div, quarter)
-    if not storage.exists(manifest_path):
-        matching = [b for b in storage.list_blobs("runs/") if b.replace("\\", "/").endswith(f"/{run_id}/run_manifest.json")]
-        if matching:
-            manifest_path = matching[0]
-        else:
-            init_status_path = get_task_status_path(run_id, "init_run", div, quarter)
-            if not storage.exists(init_status_path):
+    manifest_path = _find_manifest(storage, run_id, div, quarter)
+    if not manifest_path:
+        init_status_path = get_task_status_path(run_id, "init_run", div, quarter)
+        if not storage.exists(init_status_path):
+            index_ptr = f"runs/_index/{run_id}.json"
+            if storage.exists(index_ptr):
+                idx = storage.read_json(index_ptr)
+                init_status_path = get_task_status_path(run_id, "init_run", idx.get("div"), idx.get("quarter"))
+            else:
                 matching_st = [b for b in storage.list_blobs("runs/") if b.replace("\\", "/").endswith(f"/{run_id}/status/init_run.json")]
                 if matching_st:
                     init_status_path = matching_st[0]
-            if storage.exists(init_status_path):
-                init_st = storage.read_json(init_status_path)
-                if init_st.get("status") == "FAILED":
-                    return True
-            return False
+        if storage.exists(init_status_path):
+            init_st = storage.read_json(init_status_path)
+            if init_st.get("status") == "FAILED":
+                return True
+        return False
     try:
         manifest = storage.read_json(manifest_path)
         if manifest.get("status") in ("SUCCEEDED", "PARTIAL", "FAILED"):

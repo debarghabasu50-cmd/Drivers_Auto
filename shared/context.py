@@ -153,14 +153,24 @@ class StepContext:
     def _latest_compatible_run(
         self, step: str, target: str, expected: str
     ) -> Optional[str]:
-        prefix = f"runs/{self.div}/{self.quarter}/"
+        # Fast candidate run discovery via scoped index directory
+        index_prefix = f"runs/_index/{self.div}/{self.quarter}/"
         candidate_runs = set()
-
-        for blob in self.storage.list_blobs(prefix):
-            parts = blob.replace("\\", "/").split("/")
-            if len(parts) >= 4 and parts[:3] == ["runs", self.div, self.quarter]:
-                if parts[3] != self.run_id:
-                    candidate_runs.add(parts[3])
+        index_blobs = self.storage.list_blobs(index_prefix)
+        if index_blobs:
+            for blob in index_blobs:
+                filename = blob.replace("\\", "/").split("/")[-1]
+                if filename.endswith(".json"):
+                    cand_id = filename[:-5]
+                    if cand_id != self.run_id:
+                        candidate_runs.add(cand_id)
+        else:
+            prefix = f"runs/{self.div}/{self.quarter}/"
+            for blob in self.storage.list_blobs(prefix):
+                parts = blob.replace("\\", "/").split("/")
+                if len(parts) >= 4 and parts[:3] == ["runs", self.div, self.quarter]:
+                    if parts[3] != self.run_id:
+                        candidate_runs.add(parts[3])
 
         matches = []
         for run_id in candidate_runs:

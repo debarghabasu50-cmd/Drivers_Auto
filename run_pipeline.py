@@ -88,16 +88,26 @@ def _load_config(step: str, run_id: str, storage, config_path: str) -> dict:
         set_active_scope(cfg.get("div") or cfg.get("pipeline", {}).get("div"),
                          cfg.get("quarter") or cfg.get("pipeline", {}).get("quarter"))
         return cfg
-    
-    frozen = get_master_config_path(run_id)
+
+    # Fast O(1) catalog lookup across divisions and quarters
+    index_ptr = f"runs/_index/{run_id}.json"
+    if storage.exists(index_ptr):
+        idx = storage.read_json(index_ptr)
+        div = idx.get("div")
+        quarter = idx.get("quarter")
+        set_active_scope(div, quarter)
+        frozen = get_master_config_path(run_id, div=div, quarter=quarter)
+    else:
+        frozen = get_master_config_path(run_id)
+
     if not storage.exists(frozen):
-        # Look for matching master config across runs
+        # Fallback only if flat discovery index was not yet present
         matching = [b for b in storage.list_blobs("runs/") if b.replace("\\", "/").endswith(f"/{run_id}/master_config.json")]
         if matching:
             frozen = matching[0]
         else:
             raise PipelineError(ErrorCategory.UPSTREAM_MISSING, f"frozen config missing: {frozen} (did init_run run?)")
-    
+
     cfg = storage.read_json(frozen)
     set_active_scope(cfg.get("div") or cfg.get("pipeline", {}).get("div"),
                      cfg.get("quarter") or cfg.get("pipeline", {}).get("quarter"))
@@ -199,9 +209,14 @@ def main(argv=None, storage=None) -> int:
             try:
                 m_path = get_manifest_path(args.run_id)
                 if not storage.exists(m_path):
-                    matching = [b for b in storage.list_blobs("runs/") if b.replace("\\", "/").endswith(f"/{args.run_id}/run_manifest.json")]
-                    if matching:
-                        m_path = matching[0]
+                    index_ptr = f"runs/_index/{args.run_id}.json"
+                    if storage.exists(index_ptr):
+                        idx = storage.read_json(index_ptr)
+                        m_path = get_manifest_path(args.run_id, div=idx.get("div"), quarter=idx.get("quarter"))
+                    else:
+                        matching = [b for b in storage.list_blobs("runs/") if b.replace("\\", "/").endswith(f"/{args.run_id}/run_manifest.json")]
+                        if matching:
+                            m_path = matching[0]
                 if storage.exists(m_path):
                     m = storage.read_json(m_path)
                     if m.get("status") == "RUNNING":
