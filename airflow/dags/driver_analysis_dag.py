@@ -85,8 +85,13 @@ def _is_switched_off(step: str, run_id: str) -> bool:
     needed, so they run in-process on the Airflow worker instead of paying for a job."""
     path = get_master_config_path(run_id)
     storage = get_storage_client()
-    if not storage.exists(path) and storage.exists(f"runs/{run_id}/master_config.json"):
-        path = f"runs/{run_id}/master_config.json"
+    if not storage.exists(path):
+        index_ptr = f"runs/_index/{run_id}.json"
+        if storage.exists(index_ptr):
+            idx = storage.read_json(index_ptr)
+            path = get_master_config_path(run_id, div=idx.get("div"), quarter=idx.get("quarter"))
+        elif storage.exists(f"runs/{run_id}/master_config.json"):
+            path = f"runs/{run_id}/master_config.json"
     toggle = run_pipeline.STEPS[step].toggle
     return bool(toggle) and storage.exists(path) and storage.read_json(path).get("steps", {}).get(toggle) == "off"
 
@@ -323,16 +328,8 @@ def _resolve_dag_run_id(context: Optional[dict] = None) -> str:
     return new_run_id(now=anchor, seed=seed)
 
 
-def _run_id(context) -> str:
-    ti = context.get("ti") if context else None
-    if ti:
-        for task_id in ("load_aml_workspace", "init_run"):
-            try:
-                pushed = ti.xcom_pull(task_ids=task_id, key="run_id")
-                if pushed:
-                    return pushed
-            except Exception:
-                pass
+def _run_id(context: Optional[dict] = None) -> str:
+    """Return the stable run ID for this DAG run."""
     return _resolve_dag_run_id(context)
 
 
