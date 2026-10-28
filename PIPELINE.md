@@ -114,7 +114,7 @@ The storage layout provides complete isolation across divisions (e.g., `"EL"` fo
 │               │   └── {target}/
 │               │       ├── data_with_lagged_features.parquet # Enriched dataset with lagged features (used downstream)
 │               │       ├── selected_features.parquet
-│               │       └── fs_summary.json                 # Contains step_fp for reuse validation
+│               │       └── feature_prioritization.json     # Contains step_fp for reuse validation and KPI prioritization
 │               ├── confounder_selection/
 │               │   └── {target}/
 │               │       └── confounder_set.json             # Contains step_fp for reuse validation
@@ -151,8 +151,8 @@ The storage layout provides complete isolation across divisions (e.g., `"EL"` fo
 | Step | Consumes | Emits (Blob Paths) |
 | :--- | :--- | :--- |
 | **init_run** | `config/master_config.json`, input table (`data.input_uri`) | `snapshots/{snapshot_id}/input.parquet`<br>`runs/{div}/{quarter}/{run_id}/master_config.json`<br>`runs/{div}/{quarter}/{run_id}/run_manifest.json`<br>`runs/_index/{div}/{quarter}/{run_id}.json`<br>`runs/_index/{run_id}.json` |
-| **feature_selection** | Snapshot input, frozen master config | `runs/{div}/{quarter}/{run_id}/feature_selection/{target}/data_with_lagged_features.parquet`<br>`runs/{div}/{quarter}/{run_id}/feature_selection/{target}/selected_features.parquet`<br>`runs/{div}/{quarter}/{run_id}/feature_selection/{target}/fs_summary.json`<br>`reports/{div}/{quarter}/runs/{run_id}/fs_report.xlsx` |
-| **confounder_selection** | `data_with_lagged_features.parquet`, `fs_summary.json`, frozen config | `runs/{div}/{quarter}/{run_id}/confounder_selection/{target}/confounder_set.json` (runs once; common confounder set used for each treatment) |
+| **feature_selection** | Snapshot input, frozen master config | `runs/{div}/{quarter}/{run_id}/feature_selection/{target}/data_with_lagged_features.parquet`<br>`runs/{div}/{quarter}/{run_id}/feature_selection/{target}/selected_features.parquet`<br>`runs/{div}/{quarter}/{run_id}/feature_selection/{target}/feature_prioritization.json`<br>`reports/{div}/{quarter}/runs/{run_id}/fs_report.xlsx` |
+| **confounder_selection** | `data_with_lagged_features.parquet`, `feature_prioritization.json`, frozen config | `runs/{div}/{quarter}/{run_id}/confounder_selection/{target}/confounder_set.json` (runs once; common confounder set used for each treatment) |
 | **dml** (per fold) | `data_with_lagged_features.parquet`, `confounder_set.json`, frozen DML config, Stage-1 cache | `runs/{div}/{quarter}/{run_id}/dml/{target}/fold={fold_id}/dml_result.parquet`<br>`runs/{div}/{quarter}/{run_id}/dml/{target}/fold={fold_id}/stage1_refs.parquet`<br>New cache units in `cache/dml_stage1/{div}/{target}/{train_window}/{unit_key}/` |
 | **consolidate** | Run manifest, all task status JSONs, all fold `dml_result.parquet` files | `published/{div}/{quarter}/runs/{run_id}/consolidated_result.parquet`<br>`published/{div}/{quarter}/runs/{run_id}/run_info.json`<br>`published/{div}/{quarter}/latest/consolidated_result.parquet`<br>`published/{div}/{quarter}/latest/run_info.json`<br>`reports/{div}/{quarter}/runs/{run_id}/dml_report.xlsx`<br>`reports/{div}/{quarter}/latest/dml_report.xlsx`<br>Final updated `run_manifest.json` and index |
 

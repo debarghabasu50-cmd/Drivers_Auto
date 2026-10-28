@@ -100,7 +100,7 @@ https://mail.google.com/mail/u/1/?ui=2&ik=7d280f7890&view=lg&permmsgid=msg-f:187
      │ resolve step switches and step ﬁng                     erprints → step_plan; work_items = targets × folds
      ▼
      T2 feature_selection (AML, one job, loops targets, per-KPI cache)
-     │ → selected_features.parquet + fs_summary.json per target; FS Excel (non-blocking)
+     │ → selected_features.parquet + feature_prioritization.json per target; FS Excel (non-blocking)
      ▼
      T3 confounder_selection (AML, one job, ONCE per target, not per fold; per-treatment cache)
      │ → confounder_set.json per target (all treatments)
@@ -310,7 +310,7 @@ https://mail.google.com/mail/u/1/?ui=2&ik=7d280f7890&view=lg&permmsgid=msg-f:187
      "init_run": {"status": "SUCCEEDED", "aml_job_id": "...", "attempt": 1, "started_at": "...", "ended_at": "..."},
      "feature_selection": {"status": "SUCCEEDED", "source_run_id": "dra_20261008T0600_a1b2c3",
      "artifacts": {"orders": {"selected_features": "feature_selection/dra_.../orders/selected_features.parquet",
-     "fs_summary": "feature_selection/dra_.../orders/fs_summary.json"}},
+     "fs_summary": "feature_selection/dra_.../orders/feature_prioritization.json"}},
      "reports": ["reports/feature_selection/dra_.../feature_selection_report.xlsx"],
      "counters": {"kpis": 10, "cache_hits": 10}, "error": null},
      "confounder_selection": {"status": "CACHED", "source_run_id": "dra_20260708T0600_9d8e7f",
@@ -351,7 +351,7 @@ https://mail.google.com/mail/u/1/?ui=2&ik=7d280f7890&view=lg&permmsgid=msg-f:187
      │ ├── master_conﬁg.json r      esolved, frozen conﬁg
      │ ├── status/{task_id}.json AML job → Airﬂo                                                                                                                                           w handoﬀ
      │ └── logs/{task_id}.jsonl durable log copy
-     ├── feature_selection/{run_id}/{target}/selected_features.parquet, fs_summary.json
+     ├── feature_selection/{run_id}/{target}/selected_features.parquet, feature_prioritization.json
      ├── confounder_selection/{run_id}/{target}/confounder_set.json
      ├── dml/{run_id}/{target}/fold={fold_id}/dml_result.parquet, stage1_refs.parquet
      ├── published/{run_id}/consolidated_result.parquet
@@ -583,7 +583,7 @@ https://mail.google.com/mail/u/1/?ui=2&ik=7d280f7890&view=lg&permmsgid=msg-f:187
      Artifact                            Content
      `selected_features.parquet`         `date, target, kpi, lag, column (kpi__lagN), value` — the lagged feature matrix, the source
                                          of truth for KPI values; never rebuilt from Excel
-     `fs_summary.json`                   `run_id, target, snapshot_id, status, kpis[{kpi, tier, lag, column, included,
+     `feature_prioritization.json`       `run_id, target, snapshot_id, status, kpis[{kpi, tier, lag, column, included,
                                          exclusion_reason, cache_key, producer_run_id}], resolved_kpis[]`
      `confounder_set.json`               `run_id, target, window, method, params, treatments[{treatment_kpi, status, cache_key,
                                          producer_run_id, confounders[{kpi, lag, reason}], excluded[{kpi, reason}]}]`

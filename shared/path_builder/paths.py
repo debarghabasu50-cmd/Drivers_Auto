@@ -126,9 +126,12 @@ def get_lagged_features_path(run_id: str, target: str, div: Optional[str] = None
 
 
 def get_feature_selection_summary(run_id: str, target: str, div: Optional[str] = None, quarter: Optional[str] = None) -> str:
-    """Path to feature selection summary breakdown."""
+    """Path to feature prioritization / selection summary breakdown."""
     d, q = resolve_scope(div, quarter)
-    return f"runs/{d}/{q}/{run_id}/feature_selection/{target}/fs_summary.json"
+    return f"runs/{d}/{q}/{run_id}/feature_selection/{target}/feature_prioritization.json"
+
+
+get_feature_prioritization_path = get_feature_selection_summary
 
 
 def get_confounder_selection_path(run_id: str, target: str, div: Optional[str] = None, quarter: Optional[str] = None) -> str:
