@@ -141,6 +141,16 @@ def main(argv=None, storage=None) -> int:
             raise PipelineError(ErrorCategory.CONFIG, f"step '{args.step}' requires --target"
                                 + (" and --fold-id" if spec.needs_fold else ""))
         config = _load_config(args.step, args.run_id, storage, args.config)
+        if config and args.target:
+            for t in config.get("targets", []):
+                if args.target == t.get("column") or args.target == t.get("target_id"):
+                    args.target = t.get("target_id")
+                    break
+        task_id = make_task_id(args.step, args.target, args.fold_id)
+        status.task_id = task_id
+        status.target = args.target
+        logger.bind_context(run_id=args.run_id, component=args.step, task_id=task_id,
+                            target=args.target, fold_id=args.fold_id, attempt=args.attempt)
         status_path = get_task_status_path(args.run_id, task_id)
         try:
             storage.write_json(status_path, status.to_dict())  # live visibility: task is RUNNING

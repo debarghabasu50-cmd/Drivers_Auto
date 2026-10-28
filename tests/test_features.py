@@ -527,3 +527,32 @@ def test_terminal_manifest_on_partial_and_total_failure(tmp_path, monkeypatch):
     assert run_status.is_run_terminal(storage, run_failed, "EL", "2026Q3") is True
 
 
+def test_run_local_resume_skips_succeeded_tasks(tmp_path):
+    import run_pipeline
+    from run_local import run_all
+    from shared.path_builder.paths import get_manifest_path
+    from shared.path_builder.storage import BlobStorageClient
+    from shared.schema.contracts import ErrorCategory, PipelineError
+
+    storage = BlobStorageClient(base_dir=str(tmp_path))
+    run_id = "dra_test_resume_001"
+
+    # Step 1: Initialize run and run feature selection only
+    run_pipeline.main(["--step", "init_run", "--run-id", run_id], storage=storage)
+    run_pipeline.main(["--step", "feature_selection", "--run-id", run_id, "--target", "orders"], storage=storage)
+
+    # Calling run_all without resume must raise CONFIG error
+    with pytest.raises(PipelineError) as exc_no_resume:
+        run_all(storage, run_id=run_id, resume=False)
+    assert exc_no_resume.value.category == ErrorCategory.CONFIG
+    assert "already exists and is initialized" in exc_no_resume.value.message
+
+    # Calling run_all with resume=True must succeed, skipping feature_selection and running remaining steps
+    resumed_id = run_all(storage, run_id=run_id, resume=True)
+    assert resumed_id == run_id
+
+    # Verify downstream tasks ran and completed
+    m = storage.read_json(get_manifest_path(run_id, "EL", "2026Q3"))
+    assert m["status"] == "SUCCEEDED"
+
+

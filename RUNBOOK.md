@@ -168,30 +168,54 @@ Open `config/dml_config.json` and adjust driver treatments, controls, and combin
 
 ### Step 4: Resume Downstream Steps
 
-There are two supported methods to resume:
+There are two primary methods to resume downstream steps:
 
-#### Option A: Native Step Toggle (Recommended for Production & Airflow)
-Keep full lineage by launching the second run with feature selection toggled off and pointing to `dra_20261027_run1`:
+#### Method 1: Single-Command Automated Resume (Same Run ID — Recommended for Local DS Workflow)
+If continuing within the same run ID `dra_20261027_run1`:
 
-1. In `config/master_config.json`, set:
+```powershell
+& $PYTHON run_local.py --run-id dra_20261027_run1 --resume
+```
+
+**How it works**:
+- Reads the latest repository configurations (syncing any updates you made to `config/dml_config.json` into the run workspace).
+- Inspects task statuses: sees `init_run` and `feature_selection` are already `SUCCEEDED` and automatically skips them.
+- Sequentially executes all remaining incomplete tasks: `confounder_selection` → `dml` (all folds) → `consolidate`.
+- Renders the final status table and emits consolidated analytical artifacts.
+
+---
+
+#### Method 2: Step Toggling & Artifact Reuse (New Run ID — Recommended for Airflow & Full Lineage)
+If creating a new tracked run (`dra_20261027_run2`) that reuses feature selection outputs from `dra_20261027_run1`:
+
+1. In `config/master_config.json`, configure:
    ```json
    {
      "steps": {
-       "feature_selection": "off"
+       "feature_selection": "off",
+       "confounder_selection": "on",
+       "dml": "on",
+       "consolidation": "on"
      },
      "source_artifacts": {
        "feature_selection_run_id": "dra_20261027_run1"
      }
    }
    ```
-2. Execute the downstream run:
+   > [!IMPORTANT]
+   > - `confounder_selection` must remain `"on"` because it was not run in `run1` and must execute for `run2`.
+   > - Do **not** set `confounder_selection_run_id` to `run1` unless `run1` had already executed and succeeded at confounder selection.
+
+2. Execute the downstream run with the **new** run ID:
    ```powershell
    & $PYTHON run_local.py --run-id dra_20261027_run2
    ```
    *Result*: `feature_selection` is marked `SKIPPED`, its artifacts are loaded directly from `dra_20261027_run1`, and `confounder_selection`, `dml`, and `consolidate` run with the updated `dml_config.json`!
 
-#### Option B: Component-by-Component CLI (Same Run ID)
-If continuing within the same run ID `dra_20261027_run1`:
+---
+
+#### Method 3: Component-by-Component CLI (Manual Granular Debugging)
+If you prefer running each component individually:
 
 ```powershell
 # 1. Run confounder selection
