@@ -100,7 +100,12 @@ class StepContext:
                     f"source run {src} is not compatible with this run for '{upstream_step}' "
                     f"(no completed, compatible artifact found for target '{target}')",
                 )
-            return src
+        # If the current run itself already completed this step with a compatible artifact, reuse it
+        if (
+            self._compatible_source_completion(upstream_step, self.run_id, target, expected)
+            is not None
+        ):
+            return self.run_id
 
         src = self._latest_compatible_run(upstream_step, target, expected)
         if src is None:
