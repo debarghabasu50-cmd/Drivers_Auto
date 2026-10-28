@@ -153,6 +153,12 @@ def main(argv=None, storage=None) -> int:
                          status_path=status_path, intended_status="RUNNING",
                          exc=traceback.format_exc())
             raise PipelineError(ErrorCategory.INFRA_TRANSIENT, msg) from write_exc
+        sys.stdout.write(
+            f"\n\n\n{'=' * 80}\n"
+            f"  >>> PROCESS STARTING: [{args.step.upper()}]  task_id: {task_id}\n"
+            f"{'=' * 80}\n\n"
+        )
+        sys.stdout.flush()
         logger.info(f"task started: {task_id}", event="TASK_STARTED")
 
         ctx = StepContext(run_id=args.run_id, step=args.step, config=config, storage=storage,
@@ -231,6 +237,12 @@ def main(argv=None, storage=None) -> int:
                          level="ERROR" if status.status == "FAILED" else "INFO",
                          counters=status.counters, duration_ms=duration_ms,
                          error_category=(status.error or {}).get("category"), status=status.status)
+        sys.stdout.write(
+            f"\n{'-' * 80}\n"
+            f"  <<< PROCESS COMPLETED: [{args.step.upper()}]  task_id: {task_id}  status: {status.status}\n"
+            f"{'-' * 80}\n\n\n"
+        )
+        sys.stdout.flush()
 
         # Write durable .log file for this task: preserve latest canonical AND attempt-specific retry logs
         try:

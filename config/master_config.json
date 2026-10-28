@@ -11,8 +11,12 @@
   },
   "targets": [
     {
+      "target_id": "orders_received_net",
+      "column": "orders_received_net"
+    },
+    {
       "target_id": "orders",
-      "column": "orders_value"
+      "column": "orders_received_net"
     }
   ],
   "steps": {
@@ -32,13 +36,7 @@
       "P0"
     ],
     "explicit": [],
-    "extra": [
-      "price_index",
-      "competitor_index",
-      "gdp_growth",
-      "lead_time",
-      "marketing_spend"
-    ],
+    "extra": [],
     "exclude": []
   },
   "combinations": {

@@ -76,6 +76,7 @@ def select_confounders(df, train_df, config, drivers, time_confs, yoy_log_diff):
             "regime_dummy",
         }
         | set(config["drivers"].values())
+        | set(config["drivers"].keys())
         | {label + "_T" for label in config["drivers"]}
         | piecewise_generated_cols
     )
@@ -352,7 +353,12 @@ def run_confounder_selection(ctx: StepContext) -> StepResult:
     and runs select_confounders before writing confounder_set.json.
     """
     fs_run = ctx.upstream_run_id("feature_selection")
-    fs_summary = ctx.require(get_feature_selection_summary(fs_run, ctx.target, ctx.div, ctx.quarter))
+    summary_path = get_feature_selection_summary(fs_run, ctx.target, ctx.div, ctx.quarter)
+    if ctx.storage and not ctx.storage.exists(summary_path):
+        legacy_path = summary_path.replace("feature_prioritization.json", "fs_summary.json")
+        if ctx.storage.exists(legacy_path):
+            summary_path = legacy_path
+    fs_summary = ctx.require(summary_path)
     treatments = fs_summary.get("resolved_kpis", [])
 
     # Load enriched lagged features dataset emitted by feature_selection
@@ -455,7 +461,7 @@ def run_confounder_selection(ctx: StepContext) -> StepResult:
         {
             "treatment_kpi": driver_label,
             "status": "SUCCEEDED",
-            "confounders": [{"kpi": c, "lag": 1, "reason": "selected"} for c in confs],
+            "confounders": [{"kpi": c, "lag": 1, "reason": "selected"} for c in confs if c != driver_label and c != drivers.get(driver_label)],
         }
         for driver_label, confs in driver_confounders.items()
     ]
